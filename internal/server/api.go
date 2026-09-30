@@ -162,6 +162,10 @@ func localHost(hostport string) bool {
 	host := hostport
 	if h, _, err := net.SplitHostPort(hostport); err == nil {
 		host = h
+	} else if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		// An IPv6 Host header retains brackets when the default port is omitted.
+		ip, err := netip.ParseAddr(hostport[1 : len(hostport)-1])
+		return err == nil && ip.Is6() && ip.IsLoopback() && ip.Zone() == ""
 	}
 	if host == "localhost" {
 		return true

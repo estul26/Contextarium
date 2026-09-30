@@ -163,3 +163,34 @@ func TestAPIBrowserBoundaryAndErrorPrivacy(t *testing.T) {
 		t.Fatal("unsafe error", w.Code, w.Body.String())
 	}
 }
+
+func TestAPILoopbackHostForms(t *testing.T) {
+	s, _ := newTestServer(t)
+	for _, host := range []string{
+		"[::1]", "[::1]:8080", "[0:0:0:0:0:0:0:1]",
+		"127.0.0.1", "127.0.0.1:8080", "localhost", "localhost:8080",
+	} {
+		t.Run(host, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://"+host+"/api/v1/records", nil)
+			r.Header.Set("Origin", "http://"+host)
+			w := httptest.NewRecorder()
+			s.handle(w, r)
+			responseData[[]engine.Record](t, w, 200)
+		})
+	}
+	for _, host := range []string{
+		"[2001:db8::1]", "[2001:db8::1]:8080", "[::]",
+		"[::1%lo0]", "[::1%lo0]:8080", "[[::1]]", "[::1", "[::1]extra",
+		"[localhost]", "[127.0.0.1]",
+	} {
+		t.Run("reject_"+host, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "http://127.0.0.1/api/v1/records", nil)
+			r.Host = host
+			w := httptest.NewRecorder()
+			s.handle(w, r)
+			if w.Code != 403 || !strings.Contains(w.Body.String(), `"ORIGIN_REJECTED"`) {
+				t.Fatalf("host %q was not rejected: %d %s", host, w.Code, w.Body.String())
+			}
+		})
+	}
+}
