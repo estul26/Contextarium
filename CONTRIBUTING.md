@@ -1,6 +1,6 @@
 # Contributing
 
-Contextarium is currently freezing its architecture baseline.
+Contextarium is implementing M0 against the merged architecture baseline. Use the [M0 developer commands and runtime contract](docs/m0-runtime.md); do not begin M1 in an M0 change.
 
 Before implementation, read the project charter, architecture, all accepted ADRs, and the active milestone document.
 

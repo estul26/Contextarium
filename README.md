@@ -8,9 +8,9 @@ Contextarium is an API-first, user-controlled context and data platform. It prov
 
 ## Status
 
-**Architecture baseline v0.1 — documentation phase.**
+**M0 — Foundation. Local development only; not a production release.**
 
-Application implementation has not started. This repository is intentionally freezing the domain model, API boundaries, write model, revision rules, security baseline, and milestone plan before M0 begins.
+The architecture baseline is merged. M0 adds configuration, structured logging, SQLite migration/lifecycle support, and health/readiness probes. M1+ domain functionality is not implemented. See [M0 runtime and developer commands](docs/m0-runtime.md) for setup, operational choices, and the temporary infrastructure endpoint contract.
 
 ## Core principles
 
