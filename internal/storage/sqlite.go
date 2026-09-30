@@ -1,4 +1,4 @@
-// Package storage owns the M0 SQLite lifecycle and infrastructure migrations.
+// Package storage owns the SQLite lifecycle and embedded migrations.
 package storage
 
 import (

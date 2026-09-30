@@ -1,5 +1,9 @@
 # M1 — Generic Record Engine
 
+The concrete M1 decisions and temporary endpoint contract are defined in
+[../m1-contract.md](../m1-contract.md). Reproduction commands are in
+[../m1-development.md](../m1-development.md).
+
 ## Scope
 - subjects
 - canonical namespace grammar

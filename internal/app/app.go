@@ -1,4 +1,4 @@
-// Package app wires the M0 process lifecycle without domain services.
+// Package app wires the local development process lifecycle.
 package app
 
 import (

@@ -8,9 +8,9 @@ Contextarium is an API-first, user-controlled context and data platform. It prov
 
 ## Status
 
-**M0 — Foundation. Local development only; not a production release.**
+**M1 — Generic Record Engine. Local development only; synthetic/disposable data; not a production release.**
 
-The architecture baseline is merged. M0 adds configuration, structured logging, SQLite migration/lifecycle support, and health/readiness probes. M1+ domain functionality is not implemented. See [M0 runtime and developer commands](docs/m0-runtime.md) for setup, operational choices, and the temporary infrastructure endpoint contract.
+M0 and the Linux CI baseline are merged. M1 adds subjects, immutable schema versions, and generic schema-validated records with bounded create/read/list/update services and temporary REST endpoints. See the [M1 contract](docs/m1-contract.md) and [synthetic quick start](docs/m1-development.md). The [M0 runtime document](docs/m0-runtime.md) remains the historical foundation contract. Authentication, revision history, proposals, audit, FTS, and MCP are not implemented.
 
 ## Core principles
 

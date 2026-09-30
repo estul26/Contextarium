@@ -45,7 +45,7 @@ func TestNewerSchemaFailsStartupWithoutReadyLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO schema_migrations(version,name,checksum) VALUES(2,'future','test')"); err != nil {
+	if _, err := db.Exec("INSERT INTO schema_migrations(version,name,checksum) VALUES(2147483647,'future','test')"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

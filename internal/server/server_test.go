@@ -26,7 +26,7 @@ func newTestServer(t *testing.T) (*Server, *sql.DB) {
 	return New(db), db
 }
 
-func TestProbeContractAndDomainRoutesAbsent(t *testing.T) {
+func TestProbeContractAndFutureRoutesAbsent(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.ready.Store(true)
 	for _, tc := range []struct {
@@ -41,11 +41,11 @@ func TestProbeContractAndDomainRoutesAbsent(t *testing.T) {
 		{"DELETE", "/readyz", "method_not_allowed", 405},
 		{"GET", "/healthz/extra", "not_found", 404},
 		{"GET", "/", "not_found", 404},
-		{"GET", "/api/v1/records", "not_found", 404},
 		{"GET", "/mcp", "not_found", 404},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
 			r := httptest.NewRequest(tc.method, tc.path+"?private=SYNTHETIC_SECRET", strings.NewReader("SYNTHETIC_BODY"))
+			r.Host = "127.0.0.1"
 			r.Header.Set("Authorization", "Bearer SYNTHETIC_TOKEN")
 			w := httptest.NewRecorder()
 			s.handle(w, r)

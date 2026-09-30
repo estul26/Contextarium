@@ -1,4 +1,4 @@
-// Package server implements only the M0 infrastructure probes and HTTP lifecycle.
+// Package server adapts M1 application services and infrastructure probes to HTTP.
 package server
 
 import (
@@ -10,14 +10,17 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/estul26/Contextarium/internal/engine"
 	"github.com/estul26/Contextarium/internal/storage"
 )
 
 type Server struct {
 	db              *sql.DB
+	engine          *engine.Service
 	http            *http.Server
 	ready           atomic.Bool
 	shutdownTimeout time.Duration
@@ -25,7 +28,7 @@ type Server struct {
 
 // New requires a database that has completed storage.Open successfully.
 func New(db *sql.DB) *Server {
-	s := &Server{db: db, shutdownTimeout: 5 * time.Second}
+	s := &Server{db: db, engine: engine.New(db), shutdownTimeout: 5 * time.Second}
 	s.http = &http.Server{
 		Handler:           http.HandlerFunc(s.handle),
 		ReadHeaderTimeout: 2 * time.Second,
@@ -77,6 +80,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if strings.HasPrefix(r.URL.Path, "/api/v1/") {
+		s.handleAPI(w, r)
+		return
+	}
 	code, status := http.StatusOK, "ok"
 	switch r.URL.Path {
 	case "/healthz", "/readyz":
