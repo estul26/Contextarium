@@ -1,8 +1,15 @@
 # M2 temporary revision and mutation-audit contract
 
-**DRAFT — PENDING OWNER APPROVAL**
+**D1–D5 APPROVED — DOCUMENTATION BASELINE ONLY**
 
-This is a documentation-only proposal for **M2 — Revision Engine + Minimal
+**D6 / R3 OPEN — M2 IMPLEMENTATION NOT AUTHORIZED**
+
+Owner approval of D1–D5 was recorded on 2026-09-30, together with authorization
+for the consistent-snapshot test-plan clarification and documentation-only merge
+of PR #5. This records design approval, not completed M2 acceptance. D6/R3 remains
+open; no acceptance gate is waived.
+
+This is a documentation-only contract for **M2 — Revision Engine + Minimal
 Mutation Audit**. It does not authorize implementation or assert that M2 tests
 have passed. The companion [test plan](m2-test-plan.md) defines acceptance.
 
@@ -15,10 +22,10 @@ Design baseline: merged M1 commit
 was verified at the merged checkpoint on 2026-09-30; there were no intervening
 changes. Recheck this baseline before a later implementation begins.
 
-Repository requirements remain authoritative. Sections labeled **proposed**
-resolve details that M1 did not freeze. Approval would make this the temporary
+Repository requirements remain authoritative. D1–D5 are approved as the temporary
 milestone-local contract permitted by the [OpenAPI completion rule](baseline-invariants.md#11-openapi-completion-rule).
-It does not freeze REST v1 or rewrite any accepted ADR.
+Sections labeled **proposed** describe that approved design, not implemented
+behavior. D6/R3 remains open. This does not freeze REST v1 or rewrite any accepted ADR.
 
 | Existing requirement | Source and implication for M2 |
 | --- | --- |
@@ -474,10 +481,10 @@ This is an explicit pre-M7 compatibility transition in `/api/v1`: new PATCH call
 require a base, current Record responses gain `revision`, and record mutation
 metadata identifies its result contract. Existing successful requests retain their
 replay semantics, including old shapes. M1 clients must GET the new head and supply
-a base for new writes. The M1 quick start remains historical during this draft;
+a base for new writes. The M1 quick start remains historical during this documentation-only phase;
 updating executable examples belongs to a later authorized M2 implementation.
 
-| Proposed owner decision | Recommendation |
+| Owner decision | Approved design / remaining question |
 | --- | --- |
 | D1: M1 upgrade/history boundary | Adopt current state as revision 1, label adoption, preserve legacy replay objects verbatim. |
 | D2: Precondition and compatibility | Top-level mandatory `base_revision`; original replacement semantics; explicit legacy-replay-only exception. |
@@ -486,8 +493,8 @@ updating executable examples belongs to a later authorized M2 implementation.
 | D5: Read contract | Full snapshot DTO and bounded ascending pagination with a fixed traversal upper bound. |
 | D6: Recovery acceptance environment | Identify an approved isolated WAL/storage fault rehearsal environment and retain an open gate until exercised. |
 
-D1–D5 are concrete recommended resolutions awaiting owner approval, not undecided
-implementation defaults. D6 remains an operational question: no existing power-loss
+D1–D5 are owner-approved design resolutions for this documentation baseline.
+They do not authorize implementation. D6 remains an operational question: no existing power-loss
 harness was found in the repository and none is authorized or run in this design
 pass. The [test plan](m2-test-plan.md) records the evidence required and its blocking
 acceptance impact. Do not reboot/power-cycle the owner's machine or install/start
