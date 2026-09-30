@@ -1,0 +1,339 @@
+openapi: 3.1.0
+info:
+  title: Contextarium API
+  version: 0.1.0-draft
+  description: >
+    Draft endpoint inventory plus already-frozen shared constraints for Contextarium.
+    During M0-M6 this is not yet the complete production REST contract.
+    Before an endpoint is implemented, its owning milestone must define its request,
+    response, security, concurrency/idempotency, and error semantics. M7 reconciles
+    and freezes REST v1.
+x-contextarium-contract-status: draft-inventory
+servers:
+  - url: /api/v1
+security:
+  - bearerAuth: []
+paths:
+  /subjects:
+    get:
+      summary: List authorized subjects
+      operationId: listSubjects
+      responses:
+        "200":
+          description: Subject list
+    post:
+      summary: Create subject
+      operationId: createSubject
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Subject created
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /records:
+    get:
+      summary: List or filter authorized records
+      operationId: listRecords
+      parameters:
+        - in: query
+          name: namespace
+          schema:
+            type: string
+        - in: query
+          name: subject_id
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Record list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Create an authoritative record
+      operationId: createRecord
+      description: Requires explicit direct-write authority. Agent clients should normally use proposals.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Record created
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Identity or create-precondition conflict
+  /records/{record_id}:
+    parameters:
+      - $ref: "#/components/parameters/RecordId"
+    get:
+      summary: Get an authorized record
+      operationId: getRecord
+      responses:
+        "200":
+          description: Record
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Not found
+    patch:
+      summary: Update an authoritative record with optimistic concurrency
+      operationId: updateRecord
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Updated record
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Revision or mutation conflict
+  /records/{record_id}/revisions:
+    parameters:
+      - $ref: "#/components/parameters/RecordId"
+    get:
+      summary: List authorized record revisions
+      operationId: listRevisions
+      responses:
+        "200":
+          description: Revision list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /records/{record_id}/revisions/{revision}:
+    parameters:
+      - $ref: "#/components/parameters/RecordId"
+      - in: path
+        name: revision
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+    get:
+      summary: Get one authorized revision
+      operationId: getRevision
+      responses:
+        "200":
+          description: Revision
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Not found
+  /records/{record_id}/restore/{revision}:
+    parameters:
+      - $ref: "#/components/parameters/RecordId"
+      - in: path
+        name: revision
+        required: true
+        schema:
+          type: integer
+          minimum: 1
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      summary: Restore historical state as a new revision
+      operationId: restoreRevision
+      responses:
+        "200":
+          description: New current revision
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Revision conflict
+  /search:
+    get:
+      summary: Search authorized records
+      operationId: searchRecords
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Authorized search results
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /proposals:
+    get:
+      summary: List authorized proposals
+      operationId: listProposals
+      responses:
+        "200":
+          description: Proposal list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      summary: Create proposal
+      operationId: createProposal
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Proposal created
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /proposals/{proposal_id}:
+    parameters:
+      - $ref: "#/components/parameters/ProposalId"
+    get:
+      summary: Get authorized proposal
+      operationId: getProposal
+      responses:
+        "200":
+          description: Proposal
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Not found
+  /proposals/{proposal_id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/ProposalId"
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      summary: Approve a pending proposal atomically
+      operationId: approveProposal
+      responses:
+        "200":
+          description: Proposal approved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Proposal resolved, create-precondition, or revision conflict
+  /proposals/{proposal_id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/ProposalId"
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      summary: Reject a pending proposal atomically
+      operationId: rejectProposal
+      responses:
+        "200":
+          description: Proposal rejected
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Proposal already resolved
+  /audit:
+    get:
+      summary: List authorized audit events
+      operationId: listAuditEvents
+      responses:
+        "200":
+          description: Audit event list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /export:
+    post:
+      summary: Produce an authorized export
+      operationId: exportData
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Export result
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /import:
+    post:
+      summary: Import validated portable data
+      operationId: importData
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: Import result
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Import precondition or identity conflict
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Client bearer credential. Authenticated traffic over an untrusted network
+        must use encrypted transport.
+  parameters:
+    RecordId:
+      in: path
+      name: record_id
+      required: true
+      schema:
+        type: string
+        pattern: "^rec_[A-Za-z0-9]+$"
+      description: Opaque record identifier. Exact generator is frozen by M1.
+    ProposalId:
+      in: path
+      name: proposal_id
+      required: true
+      schema:
+        type: string
+        pattern: "^prop_[A-Za-z0-9]+$"
+      description: Opaque proposal identifier. Exact generator is frozen by M4.
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+      description: >
+        Required for retry-sensitive mutations. Exact storage/replay semantics are
+        frozen by the milestone that implements the operation.
+  responses:
+    Unauthorized:
+      description: Missing or invalid authentication
+    Forbidden:
+      description: Authenticated client is not authorized for the operation/resource
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
