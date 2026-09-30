@@ -2,12 +2,15 @@
 
 ## Design status
 
-**DRAFT — PENDING OWNER APPROVAL**
+**D1–D5 APPROVED — DOCUMENTATION BASELINE ONLY**
+
+**D6 / R3 OPEN — M2 IMPLEMENTATION NOT AUTHORIZED**
 
 The [M2 temporary contract](../m2-contract.md) and [M2 acceptance test plan](../m2-test-plan.md)
-propose the detailed design against merged M1 checkpoint
-`14dc96ad18810202f63d5ac590822f117a787e82`. They distinguish existing invariants from
-pending decisions, including M1 adoption and legacy idempotency. These documents
+record the design against merged M1 checkpoint
+`14dc96ad18810202f63d5ac590822f117a787e82`. The owner approved D1–D5 and the
+consistent-snapshot observer clarification on 2026-09-30, authorizing a
+documentation-only merge of PR #5. D6/R3 remains unresolved. These documents
 do not authorize implementation or claim that acceptance tests have run.
 
 ## Scope
