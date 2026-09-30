@@ -7,8 +7,12 @@ info:
     During M0-M6 this is not yet the complete production REST contract.
     Before an endpoint is implemented, its owning milestone must define its request,
     response, security, concurrency/idempotency, and error semantics. M7 reconciles
-    and freezes REST v1.
+    and freezes REST v1. M1 implemented operations use the temporary local-only
+    contract in docs/m1-contract.md, including its unauthenticated development
+    boundary and provisional update semantics. The security and revision entries
+    below describe the later v1 target, not claims about the M1 runtime.
 x-contextarium-contract-status: draft-inventory
+x-contextarium-m1-contract: ../docs/m1-contract.md
 servers:
   - url: /api/v1
 security:

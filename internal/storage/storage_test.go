@@ -51,8 +51,8 @@ func TestFreshDirectoryAndLifecycle(t *testing.T) {
 	if err := db.QueryRow("SELECT group_concat(name, ',') FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) != 'sqlite_'").Scan(&names); err != nil {
 		t.Fatal(err)
 	}
-	if names != "schema_migrations" {
-		t.Fatalf("unexpected M0 tables: %s", names)
+	if names != "schema_migrations,subjects,schemas,records,idempotency_keys" {
+		t.Fatalf("unexpected milestone tables: %s", names)
 	}
 	if db.Stats().MaxOpenConnections != 1 {
 		t.Fatal("connection pool is not bounded to one")
@@ -150,8 +150,8 @@ func TestFailedMigrationRollsBackWholeBatch(t *testing.T) {
 
 func TestIncompatibleSchemaIsRejected(t *testing.T) {
 	cases := map[string]string{
-		"newer":     "INSERT INTO schema_migrations(version,name,checksum) VALUES(2,'future','future')",
-		"gap":       "UPDATE schema_migrations SET version=3",
+		"newer":     "INSERT INTO schema_migrations(version,name,checksum) VALUES(2147483647,'future','future')",
+		"gap":       "UPDATE schema_migrations SET version=2147483646 WHERE version=1",
 		"checksum":  "UPDATE schema_migrations SET checksum='edited'",
 		"name":      "UPDATE schema_migrations SET name='renamed'",
 		"empty":     "DELETE FROM schema_migrations",
@@ -250,6 +250,38 @@ func TestCancelledMigrationDoesNotChangeSchema(t *testing.T) {
 	cancel()
 	if err := Migrate(ctx, db); !errors.Is(err, context.Canceled) {
 		t.Fatalf("want cancellation, got %v", err)
+	}
+	if err := CheckReady(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestM0UpgradeAndOldBinaryRefusal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m0.db")
+	db, err := openDatabase(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate(context.Background(), db, migrations[:1]); err != nil {
+		t.Fatal(err)
+	}
+	var original string
+	if err := db.QueryRow("SELECT checksum || applied_at FROM schema_migrations WHERE version=1").Scan(&original); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	if err := db.QueryRow("SELECT checksum || applied_at FROM schema_migrations WHERE version=1").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if original != after {
+		t.Fatal("M0 ledger changed")
+	}
+	if err := migrate(context.Background(), db, migrations[:1]); !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatalf("M0 accepted M1 database: %v", err)
 	}
 	if err := CheckReady(context.Background(), db); err != nil {
 		t.Fatal(err)

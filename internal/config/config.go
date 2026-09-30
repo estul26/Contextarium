@@ -1,4 +1,4 @@
-// Package config loads the small M0 runtime configuration without reading secrets.
+// Package config loads the local development runtime configuration without reading secrets.
 package config
 
 import (
@@ -57,7 +57,7 @@ func (c Config) Validate() error {
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil || !ip.IsLoopback() || ip.Zone() != "" {
-		return errors.New("CONTEXTARIUM_LISTEN_ADDR must be loopback-only in M0")
+		return errors.New("CONTEXTARIUM_LISTEN_ADDR must be loopback-only in M0-M1")
 	}
 	if port == "" || strings.IndexFunc(port, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
 		return errors.New("CONTEXTARIUM_LISTEN_ADDR port must be an integer from 0 to 65535")

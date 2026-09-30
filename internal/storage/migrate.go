@@ -12,13 +12,19 @@ import (
 //go:embed migrations/001_foundation.sql
 var foundationSQL string
 
+//go:embed migrations/002_records.sql
+var recordsSQL string
+
 type migration struct {
 	name string
 	sql  string
 }
 
 // Position defines the version. Never edit a released migration; append instead.
-var migrations = []migration{{name: "foundation", sql: foundationSQL}}
+var migrations = []migration{
+	{name: "foundation", sql: foundationSQL},
+	{name: "records", sql: recordsSQL},
+}
 
 var ErrIncompatibleSchema = errors.New("database schema is incompatible with this binary")
 

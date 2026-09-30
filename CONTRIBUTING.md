@@ -1,6 +1,6 @@
 # Contributing
 
-Contextarium is implementing M0 against the merged architecture baseline. Use the [M0 developer commands and runtime contract](docs/m0-runtime.md); do not begin M1 in an M0 change.
+Contextarium is implementing M1 against the merged M0 and Linux CI baseline. Use the [M1 temporary contract](docs/m1-contract.md) and [development guide](docs/m1-development.md). Do not begin M2 in an M1 change.
 
 Before implementation, read the project charter, architecture, all accepted ADRs, and the active milestone document.
 

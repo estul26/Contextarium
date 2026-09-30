@@ -1,5 +1,8 @@
 # M0 runtime contract and operational decisions
 
+This is the historical M0 checkpoint contract. Current M1 behavior is documented
+in [m1-contract.md](m1-contract.md) and [m1-development.md](m1-development.md).
+
 M0 is local-only development infrastructure using synthetic/disposable data. It
 implements no domain API, authentication, authorization, audit, or search. These
 choices implement ADRs 0001–0003; they do not change the architecture baseline.
