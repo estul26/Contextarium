@@ -1,8 +1,14 @@
 # M2 revision and mutation-audit acceptance plan
 
-**DRAFT — PENDING OWNER APPROVAL**
+**D1–D5 APPROVED — ACCEPTANCE PLAN ONLY**
 
-Companion to the [proposed M2 contract](m2-contract.md), based on merged M1
+**D6 / R3 OPEN — M2 IMPLEMENTATION NOT AUTHORIZED**
+
+Owner approval of D1–D5 and the consistent-snapshot observer clarification was
+recorded on 2026-09-30 for the documentation-only merge of PR #5. Implementation
+remains unauthorized. R3/T30 remains open; no acceptance gate is waived.
+
+Companion to the [M2 contract](m2-contract.md), based on merged M1
 `14dc96ad18810202f63d5ac590822f117a787e82`. This is a test **plan**, not test evidence.
 All M2 cases below are **NOT RUN / NOT IMPLEMENTED** during this documentation pass.
 Existing test coverage was read, not rerun or treated as proof of M2 behavior.
@@ -30,6 +36,13 @@ one correct event per revision, and response-to-revision agreement for M2 record
 mutation keys. Subjects/schemas do not have revision linkage.
 Legacy M1 keys are explicitly exempt from response-to-revision agreement; their
 stored bytes must match their pre-upgrade values.
+
+**Consistent-snapshot observer rule.** Each live multi-table consistency
+observation must use one explicit read transaction on a separate physical
+connection, or an equivalent single-statement consistent snapshot. Comparisons
+across separate autocommit reads that straddle a writer commit must not be treated
+as evidence of a partial commit. The observer must not acquire the writer lock
+while the writer is paused at a test barrier.
 
 ## 2. Invariant-to-test acceptance matrix
 
@@ -103,8 +116,9 @@ Test event/revision/current/idempotency failures independently, not just one gen
 transaction abort. Serialization should use a test seam rather than introduce an
 otherwise invalid production payload. Ensure the failure affects the intended
 record operation, not fixture creation. After removing a reversible injected fault,
-retry the original key and assert exactly one accepted effect. Concurrent readers
-must never observe a partial four-store combination at any barrier.
+retry the original key and assert exactly one accepted effect. Concurrent readers,
+using the consistent-snapshot observer rule in section 1, must never observe
+a partial four-store combination at any barrier.
 
 ## 4. Defined upgrade failure boundaries
 
