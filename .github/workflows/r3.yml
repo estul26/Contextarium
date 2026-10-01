@@ -67,11 +67,14 @@ jobs:
           git diff --exit-code "$baseline" -- cmd internal/engine internal/storage internal/server internal/app internal/config go.mod go.sum
           test -z "$(gofmt -l internal/r3)"
           git diff --check
+          go mod download
           go mod verify
           r3_build=$(mktemp -d "$RUNNER_TEMP/contextarium-r3-build-XXXXXX")
           touch "$r3_build/.contextarium-r3-owned"
           echo "R3_BUILD=$r3_build" >> "$GITHUB_ENV"
           sqlite_dir=$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)
+          test -n "$sqlite_dir"
+          test -f "$sqlite_dir/sqlite3-binding.h"
           export CGO_CFLAGS="-I$sqlite_dir"
           go vet -tags r3 ./internal/r3/...
           go build -tags r3 -o "$r3_build/worker" ./internal/r3/worker

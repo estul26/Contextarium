@@ -184,8 +184,14 @@ and replay in fresh worker processes. Exact candidate-source equality is checked
 in the workflow; the harness SHA, amalgamation/header hashes, build environment,
 SQLite source ID/options, settings, target positions and seeds are logged.
 
-**Current result: NOT RUN. Harness validation is pending; T18 remains PARTIAL and
-T30 remains BLOCKED pending validation and executed coverage.** No application
+**Current result: R3 job 1 failed before execution.**
+[Run 36807842932](https://github.com/estul26/Contextarium/actions/runs/36807842932)
+used harness `658fdebba839b0f6a8d19eac366b19ee98bddc43` and failed during build:
+the clean runner's module directory was queried before dependencies were downloaded,
+so the SQLite header was unavailable. No harness validation, negative control or
+fault matrix executed. The workflow now downloads/verifies modules before resolving
+the pinned header and explicitly checks it exists. One authorized R3 job remains.
+Harness validation is pending; T18 remains PARTIAL and T30 remains BLOCKED. No application
 acceptance run may start unless the storage-model, native-VFS, native-application
 control and deliberate corruption controls all pass. No result below is inferred
 from compiling the harness.
