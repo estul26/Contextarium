@@ -1,5 +1,21 @@
 # M2 — Revision Engine + Minimal Mutation Audit
 
+## Current implementation authorization
+
+The owner subsequently authorized scoped M2 implementation, tests, local
+validation, commits, a branch push, and a draft PR from approved documentation
+checkpoint `05907846c59d909990d0c6159edce1da88dea7c6` on 2026-09-30.
+D1–D5 remain the implementation specification. Final acceptance is pending;
+D6/R3 remains OPEN. This authorization does not permit merging, deployment,
+real personal data, M3, or provisioning/running a new R3 environment.
+The earlier documentation-only approval record below is retained as history;
+its implementation restriction has been superseded only for this scoped work.
+
+Current implementation evidence is tracked in the [T01–T30 matrix](../m2-evidence.md).
+
+## Historical documentation approval record
+
+
 ## Design status
 
 **D1–D5 APPROVED — DOCUMENTATION BASELINE ONLY**

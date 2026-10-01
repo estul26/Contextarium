@@ -9,65 +9,99 @@ import (
 	"errors"
 )
 
-type Service struct{ db *sql.DB }
+type Service struct {
+	db *sql.DB
+	// Internal transaction barriers are configured only by package tests; never by HTTP.
+	fault func(string) error
+}
+
+func (s *Service) checkpoint(point string) error {
+	if s.fault != nil {
+		return s.fault(point)
+	}
+	return nil
+}
+
+type MutationResult struct {
+	Data     json.RawMessage
+	Contract string
+}
+
+func (r MutationResult) MarshalJSON() ([]byte, error) { return r.Data, nil }
 
 func New(db *sql.DB) *Service { return &Service{db: db} }
 
 // Every mutation, including replay bookkeeping, uses the storage pool's
 // BEGIN IMMEDIATE transaction. No domain mutation is owned by the HTTP adapter.
 func (s *Service) mutate(ctx context.Context, scope, key string, body []byte, apply func(*sql.Tx) (any, error)) (json.RawMessage, error) {
+	result, err := s.mutateResult(ctx, scope, key, body, apply)
+	return result.Data, err
+}
+func (s *Service) mutateResult(ctx context.Context, scope, key string, body []byte, apply func(*sql.Tx) (any, error)) (MutationResult, error) {
 	if len(key) < 1 || len(key) > 255 {
-		return nil, ErrInvalid
+		return MutationResult{}, ErrInvalid
 	}
 	for _, c := range key {
 		if c < 0x21 || c > 0x7e {
-			return nil, ErrInvalid
+			return MutationResult{}, ErrInvalid
 		}
 	}
 	value, err := ParseJSON(body)
 	if err != nil {
-		return nil, err
+		return MutationResult{}, err
 	}
 	if _, ok := value.(map[string]any); !ok {
-		return nil, ErrInvalid
+		return MutationResult{}, ErrInvalid
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return nil, ErrInvalid
+		return MutationResult{}, ErrInvalid
 	}
 	sum := sha256.Sum256(canonical)
 	fingerprint := hex.EncodeToString(sum[:])
+	if err := s.checkpoint("F0"); err != nil {
+		return MutationResult{}, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, ErrUnavailable
+		return MutationResult{}, ErrUnavailable
 	}
 	defer tx.Rollback()
-	var previous, response string
-	err = tx.QueryRowContext(ctx, "SELECT request_hash, response FROM idempotency_keys WHERE scope=? AND key=?", scope, key).Scan(&previous, &response)
+	var previous, response, contract string
+	err = tx.QueryRowContext(ctx, "SELECT request_hash, response, response_contract FROM idempotency_keys WHERE scope=? AND key=?", scope, key).Scan(&previous, &response, &contract)
 	if err == nil {
 		if previous != fingerprint {
-			return nil, ErrConflict
+			return MutationResult{}, ErrConflict
 		}
-		return json.RawMessage(response), nil
+		return MutationResult{Data: json.RawMessage(response), Contract: contract}, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrUnavailable
+		return MutationResult{}, ErrUnavailable
 	}
 	result, err := apply(tx)
 	if err != nil {
-		return nil, err
+		return MutationResult{}, err
+	}
+	if err := s.checkpoint("F5"); err != nil {
+		return MutationResult{}, err
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
-		return nil, err
+		return MutationResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency_keys(scope,key,request_hash,response) VALUES(?,?,?,?)", scope, key, fingerprint, string(encoded)); err != nil {
-		return nil, ErrUnavailable
+	if _, err := tx.ExecContext(ctx, "INSERT INTO idempotency_keys(scope,key,request_hash,response,response_contract) VALUES(?,?,?,?,'m2')", scope, key, fingerprint, string(encoded)); err != nil {
+		return MutationResult{}, ErrUnavailable
+	}
+	if err := s.checkpoint("F6"); err != nil {
+		return MutationResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, ErrUnavailable
+		return MutationResult{}, ErrUnavailable
 	}
-	return encoded, nil
+	if err := s.checkpoint("F8"); err != nil {
+		return MutationResult{}, err
+	}
+	return MutationResult{Data: encoded, Contract: "m2"}, nil
 }
 
 func (s *Service) CreateSubject(ctx context.Context, key string, body []byte) (json.RawMessage, error) {
@@ -119,95 +153,6 @@ func (s *Service) PublishSchema(ctx context.Context, key string, body []byte) (j
 		return schema, nil
 	})
 }
-func (s *Service) CreateRecord(ctx context.Context, key string, body []byte) (json.RawMessage, error) {
-	return s.mutate(ctx, "POST records", key, body, func(tx *sql.Tx) (any, error) {
-		f, err := object(body, "subject_id", "namespace", "schema_id", "schema_version", "data", "key", "sensitivity", "provenance")
-		if err != nil || !required(f, "subject_id", "namespace", "schema_id", "schema_version", "data") {
-			return nil, ErrInvalid
-		}
-		record := Record{Sensitivity: "private", Status: "active"}
-		if _, ok := f["sensitivity"]; ok && !required(f, "sensitivity") {
-			return nil, ErrInvalid
-		}
-		if err := checkProvenance(f["provenance"]); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(body, &record); err != nil || !validID(record.SubjectID, "sub") || !ValidNamespace(record.Namespace) || !ValidNamespace(record.SchemaID) || !validVersion(record.SchemaVersion) || !validMetadata(record) {
-			return nil, ErrInvalid
-		}
-		if _, err := getSubject(ctx, tx, record.SubjectID); err != nil {
-			return nil, err
-		}
-		schema, err := getSchema(ctx, tx, record.SchemaID, record.SchemaVersion)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateData(schema.Definition, record.Data); err != nil {
-			return nil, err
-		}
-		record.ID, err = NewID("rec")
-		if err != nil {
-			return nil, err
-		}
-		record.CreatedAt = now()
-		record.UpdatedAt = record.CreatedAt
-		provenance, err := json.Marshal(record.Provenance)
-		if err != nil {
-			return nil, err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO records(id,subject_id,namespace,schema_id,schema_version,data,key,sensitivity,provenance,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, record.ID, record.SubjectID, record.Namespace, record.SchemaID, record.SchemaVersion, string(record.Data), record.Key, record.Sensitivity, string(provenance), record.Status, record.CreatedAt, record.UpdatedAt)
-		if err != nil {
-			return nil, ErrUnavailable
-		}
-		return record, nil
-	})
-}
-func (s *Service) UpdateRecord(ctx context.Context, id, key string, body []byte) (json.RawMessage, error) {
-	if !validID(id, "rec") {
-		return nil, ErrInvalid
-	}
-	return s.mutate(ctx, "PATCH records/"+id, key, body, func(tx *sql.Tx) (any, error) {
-		f, err := object(body, "data", "key", "sensitivity", "provenance", "status")
-		if err != nil || len(f) == 0 {
-			return nil, ErrInvalid
-		}
-		for _, name := range []string{"data", "sensitivity", "status"} {
-			if _, ok := f[name]; ok && !required(f, name) {
-				return nil, ErrInvalid
-			}
-		}
-		if err := checkProvenance(f["provenance"]); err != nil {
-			return nil, err
-		}
-		record, err := getRecord(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		if _, ok := f["provenance"]; ok {
-			record.Provenance = nil
-		}
-		if err := json.Unmarshal(body, &record); err != nil || !validMetadata(record) {
-			return nil, ErrInvalid
-		}
-		schema, err := getSchema(ctx, tx, record.SchemaID, record.SchemaVersion)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateData(schema.Definition, record.Data); err != nil {
-			return nil, err
-		}
-		record.UpdatedAt = now()
-		provenance, err := json.Marshal(record.Provenance)
-		if err != nil {
-			return nil, err
-		}
-		_, err = tx.ExecContext(ctx, "UPDATE records SET data=?,key=?,sensitivity=?,provenance=?,status=?,updated_at=? WHERE id=?", string(record.Data), record.Key, record.Sensitivity, string(provenance), record.Status, record.UpdatedAt, id)
-		if err != nil {
-			return nil, ErrUnavailable
-		}
-		return record, nil
-	})
-}
 
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -236,12 +181,12 @@ func getSchema(ctx context.Context, q queryer, id string, version int) (Schema, 
 	return v, dbError(err)
 }
 
-const recordColumns = "id,subject_id,namespace,schema_id,schema_version,data,key,sensitivity,provenance,status,created_at,updated_at"
+const recordColumns = "id,subject_id,namespace,schema_id,schema_version,data,key,sensitivity,provenance,status,created_at,updated_at,revision"
 
 func scanRecord(row scanner) (Record, error) {
 	var v Record
 	var data, provenance string
-	err := row.Scan(&v.ID, &v.SubjectID, &v.Namespace, &v.SchemaID, &v.SchemaVersion, &data, &v.Key, &v.Sensitivity, &provenance, &v.Status, &v.CreatedAt, &v.UpdatedAt)
+	err := row.Scan(&v.ID, &v.SubjectID, &v.Namespace, &v.SchemaID, &v.SchemaVersion, &data, &v.Key, &v.Sensitivity, &provenance, &v.Status, &v.CreatedAt, &v.UpdatedAt, &v.Revision)
 	if err != nil {
 		return v, dbError(err)
 	}

@@ -61,6 +61,11 @@ type Provenance struct {
 	Note   string `json:"note,omitempty"`
 }
 type Record struct {
+	Snapshot
+	Revision int64 `json:"revision"`
+}
+
+type Snapshot struct {
 	ID            string          `json:"id"`
 	SubjectID     string          `json:"subject_id"`
 	Namespace     string          `json:"namespace"`

@@ -1,6 +1,6 @@
 # Contributing
 
-Contextarium is implementing M1 against the merged M0 and Linux CI baseline. Use the [M1 temporary contract](docs/m1-contract.md) and [development guide](docs/m1-development.md). Do not begin M2 in an M1 change.
+Contextarium is implementing the approved M2 D1–D5 contract from `05907846c59d909990d0c6159edce1da88dea7c6`. Use the [M2 contract](docs/m2-contract.md), [acceptance plan](docs/m2-test-plan.md), and [development guide](docs/m2-development.md). Final acceptance and D6/R3 remain open. Do not begin M3 or provision a fault-testing environment without separate authorization.
 
 Before implementation, read the project charter, architecture, all accepted ADRs, and the active milestone document.
 

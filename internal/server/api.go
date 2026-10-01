@@ -38,12 +38,16 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+	ctx = engine.WithAttribution(ctx, engine.Actor{Kind: "development_test", ID: "local-http-adapter"}, requestID)
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/")
 	parts := strings.Split(path, "/")
 	collection := (path == "subjects" || path == "records" || path == "schemas")
 	item := (len(parts) == 2 && (parts[0] == "subjects" || parts[0] == "records") && parts[1] != "")
 	schema := (len(parts) == 3 && parts[0] == "schemas" && parts[1] != "" && parts[2] != "")
-	if !collection && !item && !schema {
+	revisions := len(parts) == 3 && parts[0] == "records" && parts[1] != "" && parts[2] == "revisions"
+	revision := len(parts) == 4 && parts[0] == "records" && parts[1] != "" && parts[2] == "revisions" && parts[3] != ""
+	restore := len(parts) == 4 && parts[0] == "records" && parts[1] != "" && parts[2] == "restore" && parts[3] != ""
+	if !collection && !item && !schema && !revisions && !revision && !restore {
 		apiError(w, 404, "NOT_FOUND", "Resource not found.")
 		return
 	}
@@ -57,12 +61,15 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	} else if item && parts[0] == "records" {
 		allow = "GET, PATCH"
 	}
+	if restore {
+		allow = "POST"
+	}
 	if !containsMethod(allow, r.Method) {
 		w.Header().Set("Allow", allow)
 		apiError(w, 405, "METHOD_NOT_ALLOWED", "Method not allowed.")
 		return
 	}
-	opts, err := queryOptions(r, collection && r.Method == "GET", path == "records")
+	opts, err := queryOptions(r, (collection || revisions) && r.Method == "GET", path == "records")
 	if err != nil {
 		serviceError(w, err)
 		return
@@ -70,6 +77,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	key := ""
 	if r.Method == "POST" || r.Method == "PATCH" {
+		if parts[0] == "records" && len(r.Header.Values("If-Match")) != 0 {
+			serviceError(w, engine.ErrInvalid)
+			return
+		}
 		media, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil || media != "application/json" || len(r.Header.Values("Content-Type")) != 1 || r.Header.Get("Content-Encoding") != "" {
 			apiError(w, 415, "UNSUPPORTED_MEDIA_TYPE", "Use unencoded application/json.")
@@ -104,6 +115,21 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	var next *string
 	status := 200
 	switch {
+	case revisions:
+		var page engine.Page[engine.Revision]
+		page, err = s.engine.ListRevisions(ctx, parts[1], opts)
+		data = page.Items
+		next = &page.NextCursor
+	case revision || restore:
+		var n int64
+		n, err = engine.ParseRevision(parts[3])
+		if err == nil {
+			if restore {
+				data, err = s.engine.RestoreRecord(ctx, parts[1], n, key, body)
+			} else {
+				data, err = s.engine.GetRevision(ctx, parts[1], n)
+			}
+		}
 	case path == "subjects" && r.Method == "POST":
 		data, err = s.engine.CreateSubject(ctx, key, body)
 		status = 201
@@ -142,6 +168,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta := map[string]any{"api_version": "v1", "request_id": requestID}
+	if result, ok := data.(engine.MutationResult); ok {
+		meta["result_contract"] = result.Contract
+		data = result.Data
+	}
 	if next != nil {
 		meta["next_cursor"] = *next
 	}
@@ -160,12 +190,21 @@ func containsMethod(allow, method string) bool {
 }
 func localHost(hostport string) bool {
 	host := hostport
-	if h, _, err := net.SplitHostPort(hostport); err == nil {
+	if h, port, err := net.SplitHostPort(hostport); err == nil {
+		if port == "" || strings.IndexFunc(port, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+			return false
+		}
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return false
+		}
 		host = h
 	} else if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
 		// An IPv6 Host header retains brackets when the default port is omitted.
 		ip, err := netip.ParseAddr(hostport[1 : len(hostport)-1])
 		return err == nil && ip.Is6() && ip.IsLoopback() && ip.Zone() == ""
+	}
+	if host == hostport && strings.Contains(host, ":") {
+		return false
 	}
 	if host == "localhost" {
 		return true
@@ -213,7 +252,17 @@ func queryOptions(r *http.Request, list, records bool) (engine.ListOptions, erro
 	return o, nil
 }
 func serviceError(w http.ResponseWriter, err error) {
+	var conflict *engine.RevisionConflict
 	switch {
+	case errors.As(err, &conflict):
+		w.WriteHeader(409)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "REVISION_CONFLICT", "message": "Base revision does not match current state.", "details": map[string]int64{"expected_revision": conflict.Expected, "current_revision": conflict.Current}}})
+	case errors.Is(err, engine.ErrBaseRequired):
+		apiError(w, 400, "BASE_REVISION_REQUIRED", "A base revision is required.")
+	case errors.Is(err, engine.ErrRevisionLimit):
+		apiError(w, 409, "REVISION_LIMIT_REACHED", "Revision limit reached.")
+	case errors.Is(err, engine.ErrSchemaPair):
+		apiError(w, 409, "SCHEMA_PAIR_CONFLICT", "Historical schema pair differs.")
 	case errors.Is(err, engine.ErrInvalid):
 		apiError(w, 400, "INVALID_ARGUMENT", "Invalid request.")
 	case errors.Is(err, engine.ErrNotFound):
