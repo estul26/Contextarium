@@ -9,10 +9,11 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
-Current targeting correction: [source review only](#targeting-correction--source-review-only-runtime-not-run); new regressions and runtime validation NOT RUN.
-
-Latest executed R3 evidence: [fifth dedicated job](#fifth-dedicated-job--prerequisites-pass-matrix-stopped-on-missing-target).
-The job failed after partial matrix coverage; T18 PARTIAL, T30 BLOCKED, no remaining execution slots.
+Latest executed R3 evidence: [sixth dedicated job](#sixth-dedicated-job--targeting-tests-pass-matrix-stopped-before-mismatched-injection).
+All 26 targeting tests, 16 fixture tests and prerequisites passed. The matrix failed
+before a mismatched injection after 379 cases / 1,895 recoveries. T18 PARTIAL,
+T30 BLOCKED, D6/R3 OPEN; all six slots consumed. Earlier source-review and run
+records below describe their historical status, not the current execution result.
 
 ## Execution boundary
 
@@ -129,7 +130,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T15 | PASS | `TestM2ImmutableSQLHistory`, `TestM2HTTPContractAndSafety` (G/R): UPDATE/DELETE/REPLACE/upsert guards, immutable revision field, GET-only routes/405, absent audit API, unchanged state after reopen. | None. |
 | T16 | PASS | `TestM2LinkageGuards`, `TestM2ImmutableSQLHistory` (G/R): missing references/events, wrong pair/ID, duplicate event, invalid base/source/actor/range, head mismatch including null, deletion/replacement, deferred commit rejection. | None within the approved application/guard boundary; privileged schema editing is outside it. |
 | T17 | PASS | `TestM2ControlledActionClock` (F/G/R): approved restore action and event time/actor linkage under all three clocks; `TestM2HTTPContractAndSafety`, `TestM2PreconditionsAttributionAndFingerprints`, `TestM2NoopKindsAndFullRestore`, `TestM2SnapshotsRestoreAndReplay`, existing privacy tests (G/R/B): explicit actor, spoof rejection, event actions/minimal columns and no payload leakage. | Attribution remains development/test, never authentication. |
-| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | Fifth-job WAL write/sync fault cases passed for create/data/metadata/archive/unarchive, with no-op partial; restore and full required boundary coverage remain missing. T18 is not closed by this partial matrix or SQL-only errors. |
+| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | Fifth- and sixth-job WAL write/sync fault cases passed for create/data/metadata/archive/unarchive, with no-op partial; restore and full required boundary coverage remain missing. T18 is not closed by this partial matrix or SQL-only errors. |
 | T19 | PASS | `TestM2RevisionPagination`, `TestM2HTTPContractAndSafety` (G/R): 205+ revisions, limits default/1/100, changed limit, append and restore between pages, fixed end, invalid cursors/queries/numbers, missing/empty, unchanged reads. | None. |
 | T20 | PASS | `TestM2MigrationInterruptionAndRetry`, existing fresh/M0 migration tests (G/R/B): fresh/M0/empty M1 and M1 metadata/keys without records; ledger retained, no invented adoption. New record creation is exercised on fresh and upgraded stores. | None. |
 | T21 | PASS | `TestM2AdoptionAndLegacyReplay` (G/R), B with actual M1 binary: active/archived records, multiple M1 edits/replays, verbatim current bytes/times, one adoption each, explicit boundary. | None. |
@@ -141,7 +142,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Fifth job: 16 fixture tests, nine wrapper checks, prerequisites, five negative controls and both real M1 fixtures PASS; 386 fault cases / 1,930 recovery checks completed before `noop-s512-47-full` failed its required target check. | Missing target; no-op incomplete; restore, migration, fresh/empty initialization, checkpoint/WAL reset/truncate and new acknowledged-effect fault survival remain unexecuted. All five slots consumed. See detailed evidence below. |
+| T30 | BLOCKED | Sixth job: 26 targeting tests, 16 fixture tests, nine wrapper checks, prerequisites, five negative controls and both real M1 fixtures PASS; 379 cases / 1,895 recovery checks before `noop-s512-b39-cut-after` failed its pre-injection descriptor check. Fifth-run 386 / 1,930 remain separate historical evidence. | No-op incomplete; restore, migration, fresh/empty initialization, checkpoint/WAL reset/truncate and new acknowledged-effect fault survival remain unexecuted. All six slots consumed. See detailed evidence below. |
 
 ## Failure points and observation
 
@@ -859,14 +860,186 @@ T18 **PARTIAL**, T30 **BLOCKED**, D6/R3 **OPEN**, M2 acceptance **PENDING**, PR 
 D1–D5, ordinary CI and every existing workflow gate are unchanged. Architecture
 deviations: **NONE**; the test-selection change above is proposed for source review.
 
+## Sixth dedicated job — targeting tests pass; matrix stopped before mismatched injection
+
+The owner authorized one additional standard `ubuntu-24.04` job, the sixth
+historically, with 60 minutes total, $0 paid usage and no rerun, replacement or
+local substitute. The five previous allowances stayed exhausted. This job used
+the reviewed source unchanged; only separate one-shot wiring was added. Its
+push path, exact predecessor/message, first-attempt and single-run checks exclude
+reporting pushes and reruns. Every earlier workflow gate remains unchanged.
+
+- Application: `b6f63a7564977555faffe6f9ca6b1a9c22910d43`.
+- Reviewed harness/controller/tests: `6fbdc611672f493626ab758dfc7ce1e9682307a1`.
+- Genuine M1 source: `14dc96ad18810202f63d5ac590822f117a787e82`.
+- Workflow: `aea4746d6d497ffbb1d05f1c621d9fa775bc67de`.
+- [Run 36868756735](https://github.com/estul26/Contextarium/actions/runs/36868756735),
+  job `110390788451`, attempt **1**, **FAIL**. Job duration **184 seconds**,
+  2026-10-01 13:27:07–13:30:11 UTC, including setup/build/reporting.
+
+**The sixth allowance is consumed. Additional execution slots: ZERO.** No source
+repair, retry, replacement or second acceptance invocation followed the failure.
+The original dirty controller patch and all unrelated worktrees/artifacts remain
+preserved. The reporting checkout does not include that old uncommitted patch.
+
+### Executed stages
+
+| Stage, in execution order | Actual result |
+| --- | --- |
+| `python3 scripts/test_r3_targeting.py -v` | **PASS: exactly 26 tests**, `Ran 26 tests in 0.497s`, `OK`; no skips or expected failures. |
+| `python3 scripts/test_r3_fixture.py -v` | **PASS: exactly 16 tests**, `Ran 16 tests in 0.309s`, `OK`; no skips or expected failures. |
+| Source equality, formatting, pinned module download/verification, tagged vet/worker build, genuine M1 build | PASS. Modules downloaded before resolving the bundled header; no system SQLite substitution. |
+| Controlled rejection-wrapper checks | **PASS: nine**, including exact rejection, different/no rejection and propagation of worker/timeout/malformed/missing-field/lookup failures. |
+| Model/VFS, native and instrumented application, recovery/replay and positive-oracle prerequisites | PASS. |
+| Five exact-reason negative controls | PASS: incorrect sync, lost acknowledgement, broken audit/revision/idempotency linkage; positive oracle still passed afterward. |
+| Real populated and empty M1 fixtures | **Both PASS**: controller SIGTERM, exit 0, WAL absence, no secondary cleanup errors; safe ready/stopped logs retained. These closures are R1, not R3 evidence. |
+| One acceptance invocation and conditional matrix | **FAIL / incomplete** after **379 completed fault cases / 1,895 fresh-process recovery checks**. |
+
+The negative-control reasons remain exactly `successful sync persistence`,
+`acknowledged mutation lost/changed`, `event/revision pair`,
+`head/snapshot mismatch` and `idempotency revision absent`. The wrapper and Python
+suites validate harness behavior; they are not application durability evidence.
+
+### Completed sampling and the failure
+
+| Application family | Sector 512 cases | Sector 4096 cases | Coverage in this run |
+| --- | ---: | ---: | --- |
+| Create | 36 | 36 | All announced samples completed |
+| Data PATCH | 36 | 36 | All announced samples completed |
+| Metadata PATCH | 36 | 36 | All announced samples completed |
+| Archive | 36 | 36 | All announced samples completed |
+| Unarchive | 36 | 36 | All announced samples completed |
+| No-op | 19 of 41 | 0 | Required target mismatch; incomplete |
+| Restore, checkpoint, automatic checkpoint, adoption, fresh initialization, empty-M1 upgrade | 0 | 0 | NOT RUN |
+
+There were 11 announced family/sector plans, 89 sampled targets and 401 planned
+fault combinations. Of these, 379 completed, one failed before injection and 21
+later combinations were not attempted. Each completed case ran **discard/17,
+retain/17, reorder-torn/17, reorder-torn/29 and reorder-torn/101**. Outcomes were
+1,525 wholly absent and 370 wholly present. Completed faults: cut-before **85**,
+cut-after **84**, IOERR **84**, FULL **63**, partial write **63**; targets were **316
+WAL writes and 63 WAL syncs**. Initial WAL-header writes do not establish the
+unexecuted automatic-checkpoint WAL-reset coverage. No database checkpoint write,
+database sync or WAL truncation case completed.
+
+Independent log reconciliation checked every completed case against its announced
+full descriptor/position/prefix hash and compatible mode, unique case identity,
+all five recovery schedules, state/image hashes, sample labels and aggregate
+manifest. All successful live sequence numbers happened to equal their discovery
+numbers; real shifted-sequence success is therefore **not** established by this
+run (the fake-trace test covers that branch). First/middle/last labels still refer
+to discovery positions. Sampling is bounded, not exhaustive. Historical fifth-run
+386 cases / 1,930 recoveries remain separate at their original source/schedules;
+they are not substituted into this run's completeness accounting.
+
+**Failed case: `noop-s512-b39-cut-after`.** The plan selected the first of three
+`mutation-noop` WAL commit-marker writes, discovery sequence 39, offset **70072**,
+length **24**, flags 0. The live sequence 39 at that offset was an ordinary WAL
+frame header. The next observed commit marker was sequence **45**, offset
+**82432**, length 24. It did not match the planned descriptor/prefix.
+
+The controller stopped at `pre-injection-descriptor-check`, stable identifier
+`controller-assertion:observe:596`; that exact source line requires
+`required target group prefix changed`. Diagnostics show **no selected sequence,
+no trace-verification authorization, no injection decision and no reached target**.
+There were 43 I/O decision records, no acknowledgement, no done record, no partial
+protocol bytes and no malformed record. The last completed I/O was write 44
+(offset 78336, length/applied 4096, rc 0); write 45 remained pending. The worker was
+still running at primary failure, then controller cleanup sent SIGKILL to that
+test-owned child; there were no secondary cleanup errors. No recovery for this
+failed case is counted.
+
+This demonstrates rejection of the wrong pending descriptor before injection. It
+also confirms that strict selected-group reproducibility still blocks full
+execution. It does **not** establish the cause of the changed commit-marker
+layout, recover missing historical trace data or prove an application defect.
+Production entropy/time, storage model and reviewed source were not changed.
+
+**All 379 completed cases had zero newly acknowledged responses**, both overall
+and before the selected fault. Their full oracle checked previously durable
+history and all-or-none ambiguous effects, exact data/schema, migration state,
+head/revision/audit/idempotency linkage, integrity/FKs and same-key replay in fresh
+processes. They do not prove survival of newly acknowledged effects under the
+required post-response checkpoint faults. The external acknowledgement ledger
+remains required; commit-marker detection is not client acknowledgement.
+
+### Fidelity, retained evidence and limits
+
+The runner verified production-source equality against the application pin.
+Observed: go-sqlite3 **v1.14.52**, bundled SQLite **3.53.4**, source ID
+`2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`;
+WAL, synchronous **2/FULL**, foreign keys **1**, busy timeout **1000 ms**, one open
+connection, page size **4096**, auto-checkpoint **1000**. Both modeled sector sizes
+were used. `mmap_size` was explicitly unsupported with the VFS-control/no-row
+reason, not fabricated as zero. Eleven baseline no-mmap checks recorded five
+control rejections each, 26 reads for the two create baselines and 29 for the
+other nine, with zero fetches throughout; the always-null/no-delegation fetch
+policy was required. The logs retain compile options with **three entries
+redacted by the existing allowlist**; their runtime values are not recovered here.
+
+Essential SHA-256 evidence:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Controller result stream, 2,125,881 bytes | `bcfdead4b048e451c86b0e16a5795b2e321a7a8f886b7729fc4e8e63e4f458f0` |
+| Canonical completed-case manifest | `9a2a6b7ff37ebb7ff0e4c438b17c714ff14b178d1c1abb54af7fd3dd3e28347f` |
+| Targeting test output, 3,599 bytes | `bda73272562fd77039c97b498637abd0a331ab78dd9bdd416a30ab7c7efe8821` |
+| Fixture test output, 2,153 bytes | `2a0eaa9b8d4b3655a15d8ad5b2e4640d7b84797b538f49c5d89140fed9fd35ac` |
+| Worker binary | `b79325aa476cf677ed10643b26ac81866270c77cbde27196b74ca52ba93d7543` |
+| Genuine M1 binary | `c0bcab916eee59c2423ac1fb23ec6c231e8071e1e0564487579649a162bd525d` |
+| SQLite amalgamation | `eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00` |
+| SQLite header | `4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f` |
+| Failed-case trace, 173,381 bytes | `967a40c7df60a41a851867a7b244a2e5e11c99d7ff59a92ae67c1a09a94a09a7` |
+
+The complete downloaded controller stream matched the runner's byte count/hash,
+all 8,646 settings-query records and zero malformed result records; no truncated
+result stream was observed. Source/dependency hashes, planned/reached descriptors,
+per-case trace/ledger/image/state hashes, safe failure/cleanup diagnostics and
+runner manifests remain in job logs. Raw database pages, full traces, responses
+and stderr were not uploaded; hashes cannot reconstruct their contents. Failed
+trace/stderr bytes existed only on the disposable runner. An independent full
+raw-trace audit is unavailable after runner disposal.
+
+Runner: public repository, standard `ubuntu-24.04`, image `20260927.320.1`, 4 CPUs,
+`MemTotal: 16373452 kB`, x86_64 kernel `6.17.0-1022-azure`, Go 1.26.8, GCC 13.3.0.
+Free bytes: **92,411,924,480** before tests, **92,206,338,048** before execution,
+**92,200,083,456** after; remaining scratch **849,697 bytes**. The unchanged
+controller checked its **4 GiB** scratch bound and **2 GiB** free reserve at case
+boundaries; no resource failure occurred. Peak usage was **not measured**, so
+these observations are not a continuous peak/reserve measurement.
+
+No artifact/cache upload or paid resource was used; API artifact count is zero.
+The verified public standard-runner execution is **$0** under
+[GitHub's billing policy](https://docs.github.com/en/billing/concepts/product-billing/github-actions),
+and job logs do not count as artifact storage. No billing/capacity change was
+made. Synthetic data and marked runner-owned paths were used throughout.
+
+### Acceptance and publication status
+
+- Prerequisite harness validation: **PASS**; full validation/matrix: **FAIL**.
+- T18: **PARTIAL**; no-op incomplete and restore/storage-boundary coverage missing.
+- T30/R3: **BLOCKED**; required target mismatch, remaining families and newly
+  acknowledged-effect fault recovery are incomplete.
+- D6/R3: **OPEN**; M2 acceptance **PENDING**; PR #6 **DRAFT**.
+- Additional execution slots: **ZERO**. No repair, rerun, merge, deployment or M3.
+- Architecture deviations: **NONE**. This failure grants no new design decision.
+
+Ordinary [CI 36868760789](https://github.com/estul26/Contextarium/actions/runs/36868760789)
+passed at the workflow commit; it is separate from R3 evidence. This publication
+changes only the new one-shot workflow and this evidence document. Every reviewed
+source file, migration, dependency, approved contract, ordinary CI and previous
+workflow remains unchanged. The subsequent reporting commit is identified in PR
+#6, avoiding a self-referential SHA here.
+
 ## Review boundary
 
 Architecture deviations: **NONE**. D1–D5 are retained. Migration 001/002, dependencies,
 accepted ADRs and ordinary CI behavior are unchanged. Malformed Host port forms are rejected
 consistently while valid loopback forms remain supported. There is no M3+ feature,
 authenticated actor, public audit query, deployment, or real personal data.
-No application defect is established by the historical failures or the fifth-job
-missing-target failure. Fifth-job prerequisite controls and a bounded subset of
-WAL fault cases passed; remaining storage/power-loss coverage is incomplete.
+No application defect is established by the historical failures, fifth-job missing
+target or sixth-job pre-injection descriptor mismatch. Prerequisite controls and
+bounded subsets of WAL fault cases passed; remaining storage/power-loss coverage
+is incomplete.
 This gap is not waived or represented as application acceptance.
 The draft PR is not a request to merge.
