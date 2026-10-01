@@ -136,7 +136,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Both original R3 jobs consumed. The separately authorized one-shot no-fault diagnostic passed, but the acceptance matrix and remaining negative controls did not run. | The single diagnostic slot is also consumed. Further execution requires renewed authorization; all prerequisite controls and required fault evidence remain necessary. |
+| T30 | BLOCKED | The fourth dedicated job passed the wrapper and full prerequisite gates, including all five negative controls, then failed with an AssertionError before any application fault schedule/case was logged. | All four dedicated slots are consumed. No application fault-matrix coverage exists; the assertion's exact cause is unretained. Further execution requires separate authorization. |
 
 ## Failure points and observation
 
@@ -184,7 +184,7 @@ and replay in fresh worker processes. Exact candidate-source equality is checked
 in the workflow; the harness SHA, amalgamation/header hashes, build environment,
 SQLite source ID/options, settings, target positions and seeds are logged.
 
-**Last full harness validation result: FAIL; T18 PARTIAL; T30/R3 BLOCKED.**
+**Original two-job harness validation result: FAIL; T18 PARTIAL; T30/R3 BLOCKED.**
 Both authorized jobs have been consumed. The R3 workflow now has an unconditional
 false gate; no third job or rerun is authorized. No application acceptance fault
 matrix ran, and no R3 durability claim is made.
@@ -359,13 +359,150 @@ failure handling, simulated persistence-loss survival or physical durability.
 Further execution requires separate owner authorization; there is no remaining
 R3 or diagnostic slot.
 
+## Fourth dedicated job: reviewed wrapper validation and conditional R3
+
+The owner separately authorized one new standard `ubuntu-24.04` job, first attempt
+only, with a 60-minute total limit and $0 paid usage. Setup/build failure would
+consume the slot. The original two R3 jobs and completed diagnostic remained
+exhausted. Only new one-shot workflow wiring was added; both older workflows,
+the reviewed harness/controller, application, migrations and dependencies were
+unchanged. There was no local substitute execution.
+
+[Run 36818758680](https://github.com/estul26/Contextarium/actions/runs/36818758680)
+**FAIL**, attempt 1, one job, 36 seconds total
+(`2026-10-01T05:13:42Z`–`05:14:18Z`). The allowance is consumed; no repair,
+rerun, replacement or further execution occurred. PR #6 remains DRAFT.
+
+| Identity | Exact checkpoint |
+| --- | --- |
+| Application tested | `b6f63a7564977555faffe6f9ca6b1a9c22910d43` |
+| Reviewed harness/controller checked out | `ce6755148f9f4b66d0d9ad49208a8550c0bb0ed1` |
+| Workflow | `7c37d62ad1a83dac544cb16833d0e05b80a26dfe` |
+| Actual M1 fixture binary source | `14dc96ad18810202f63d5ac590822f117a787e82` |
+
+Build/source checks passed: clean exact checkout, application-source equality,
+Go formatting, pinned module download before SQLite header resolution,
+`go mod verify`, tagged vet and worker build, and M1 fixture-binary build. The
+worker links bundled go-sqlite3 v1.14.52 / SQLite 3.53.4, not system SQLite.
+Worker SHA-256: `936cde2fca275b0e0cd7179ce389f138ab21a7c9c1d773b5cad89bcb3883cb5d`.
+Controller SHA-256: `b931738a0e5b8f72930c1865ccf12e566b77f0f44df8ac3a9daafac9c0f87837`.
+The build manifest retains all harness, dependency, amalgamation and header hashes.
+
+### Executed prerequisite evidence
+
+**Wrapper behavioral checks: PASS (9/9).** The workflow loaded the reviewed
+`expect_reject` without invoking controller main, using controlled callbacks.
+It verified the exact expected assertion produces the intended PASS record;
+different assertions, a worker-failure assertion and no rejection fail without
+such a record; TimeoutExpired, CalledProcessError, JSONDecodeError, KeyError and
+StopIteration propagate as the same exception objects. These checks validate
+the wrapper, not application durability or real worker-failure diagnostics.
+
+**Full prerequisite harness validation: PASS.** Executed model checks covered
+visibility, successful/failed sync, truncation, namespace operations and
+deterministic reconstruction. The native raw-VFS probe and its first-sync IOERR
+control passed. Native and instrumented application controls, preliminary
+fresh-process inspection/recovery, same-key replay and second-replay equality
+all returned through their required checks. The positive image was freshly
+inspected, matched its expected state and passed the oracle before corruption;
+deep copies were corrupted and the positive input passed again afterwards.
+
+All five required negative controls logged their exact rejection:
+
+| Negative control | Observed rejection | Result |
+| --- | --- | --- |
+| Incorrect sync semantics | `successful sync persistence` | PASS |
+| Lost acknowledged mutation | `acknowledged mutation lost/changed` | PASS |
+| Broken audit linkage | `event/revision pair` | PASS |
+| Broken revision linkage | `head/snapshot mismatch` | PASS |
+| Broken idempotency linkage | `idempotency revision absent` | PASS |
+
+These oracle controls corrupt observed in-memory input copies; they do not prove
+on-disk corruption recovery. The retained gate record states harness validation
+PASS and matrix STARTING only after every prerequisite returns. The wrapper
+checks and this gate were independently reconciled against the pinned source and
+actual individual log records; no final PASS line was used as acceptance proof.
+
+Runtime settings were retained for both application controls: SQLite 3.53.4,
+source ID `2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`,
+WAL, synchronous=2 (FULL), foreign_keys=1, busy_timeout=1000,
+wal_autocheckpoint=1000, page_size=4096, max_open_connections=1. Native mmap_size=0;
+instrumented mmap_size reported unsupported with `vfs-control-notfound-no-row`.
+Three compile-option entries per control were sanitized as `redacted`; their
+exact runtime values are not retained.
+
+### Failure and acceptance reconciliation
+
+The controller subsequently emitted FINAL FAIL / `AssertionError` and exited 1.
+No matrix `settings`, `schedule` or `case` record appeared: **zero application
+fault schedules, target acknowledgements, completed cases or matrix recoveries**
+are evidenced. The source proceeds from the prerequisite gate through M1 fixture
+preparation before the first matrix baseline. The retained output does not
+identify the exact assertion or preserve that fixture child's HTTP response,
+stderr or exit detail, so no particular fixture failure or application defect is
+established. No assertion, source, oracle or storage model was changed to proceed.
+
+Seeds 17, 29 and 101 executed only in the small-model deterministic checks;
+retain/17 also reconstructed the preliminary instrumented application image.
+No application discard/reorder/torn fault schedule ran. The raw probe's first-sync
+IOERR was prerequisite evidence; its separate target/trace details were not
+retained after later controls reused the trace file. It does not close T18.
+
+T18 remains **PARTIAL**: F7 application storage write/sync failures for the required
+mutation paths remain unexecuted. T30/R3 remains **BLOCKED**: mutation, adoption,
+fresh/empty-M1 initialization, commit, checkpoint and WAL reset/truncation fault
+coverage is absent. D6/R3 is **OPEN** and M2 acceptance **PENDING**. The fourth job
+failed even though its prerequisite gate passed. The earlier no-fault diagnostic
+at `43e382e` remains PASS; historical failed runs remain unchanged above.
+
+### Retained evidence and resource boundaries
+
+Sanitized job logs retain 9 wrapper results, 5 exact-reason negative-control
+results, 4 prerequisite validation records, 44 incremental settings records,
+the gate, failing FINAL and consumed-slot report. The controller log manifest
+reports 9,229 bytes, zero malformed records, zero matrix cases/recoveries and
+SHA-256 `0d0a9d1199810abdaf11a848a2d41eba9940f16f3bf5f5a748ace817263c16f9`.
+
+The failure reporter hashed remaining test-owned evidence without printing pages,
+SQL, request bodies or raw stderr:
+
+| Evidence remaining after failure | Bytes | SHA-256 |
+| --- | --- | --- |
+| VFS trace | 475658 | `a08074195edeb386144f48cef1038699686caf5e3abcd643b5a91c908a51f047` |
+| External acknowledgement ledger | 48735 | `35272f260fe0f5744c1a793d9b40afec35aa2685ba5cea52fbd64edc9251e45c` |
+| Instrumented worker stderr | 26534 | `f1d4ac6d1833d76b1511318e7451dc1e80f7811206f736511d806ece24fe074b` |
+
+The last retained VFS row is a post record, seq=116, rc=0, applied=1352; its row
+does not identify role/operation/range/phase. These remaining files belong to the
+earlier instrumented control, not a demonstrated failing M1 fixture or matrix
+fault target. Hashes preserve identity but cannot recover missing content after
+runner disposal. No full trace/database/ledger or fixture-child log was uploaded.
+
+Environment: standard public-repository runner, Ubuntu image `20260920.314.1`,
+Go 1.26.8, GCC 13.3.0, kernel `6.17.0-1022-azure`, x86_64, 4 CPUs, 16373452 kB RAM.
+Free space was 92,137,967,616 bytes before execution and 92,136,939,520 afterwards;
+remaining modeled scratch was 868,721 bytes. The reviewed controller's 4 GiB cap
+and 2 GiB reserve checks were retained. Peak usage was not measured; the retained
+measurements establish the boundaries at those checkpoints, not continuous peak
+telemetry. Only marked runner-owned temporary resources and synthetic data were
+used; no personal VM/database, host reboot, real-disk filling or production switch.
+
+Artifacts API count is zero; there are no artifact/cache upload steps. Only
+standard public-repository hosted compute was used, with $0 additional usage
+under [GitHub's public-runner pricing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
+[Ordinary CI 36818761528](https://github.com/estul26/Contextarium/actions/runs/36818761528)
+passed at workflow SHA `7c37d62ad1a83dac544cb16833d0e05b80a26dfe`; it is separate
+and is not R3 validation. All four dedicated execution slots are consumed.
+Reporting pushes cannot satisfy the new workflow's exact predecessor/message/path
+gates; reruns fail its first-attempt gate. There is no remaining execution allowance.
+
 ## Review boundary
 
 Architecture deviations: **NONE**. D1–D5 are retained. Migration 001/002, dependencies,
 accepted ADRs and CI behavior are unchanged. Malformed Host port forms are rejected
 consistently while valid loopback forms remain supported. There is no M3+ feature,
 authenticated actor, public audit query, deployment, or real personal data.
-No application defect is established by the historical R3 harness failure. The
-later no-fault diagnostic passed, but prerequisite controls and storage/power-loss
-evidence remain incomplete. These gaps are not waived or represented as application
-acceptance. The draft PR is not a request to merge.
+No application defect is established by the historical or fourth-job failures.
+The later prerequisite controls passed, but application storage/power-loss evidence
+remains absent. This gap is not waived or represented as application acceptance.
+The draft PR is not a request to merge.

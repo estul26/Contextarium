@@ -157,3 +157,23 @@ schedules or acceptance matrix ran; no rerun/replacement is authorized. The
 original R3 false gate remains unchanged. Last full harness validation remains
 FAIL; T18 PARTIAL, T30 BLOCKED, D6/R3 OPEN and M2 acceptance PENDING. No-fault success
 does not authorize proceeding into R3. PR #6 remains DRAFT.
+
+The owner later authorized exactly one new 60-minute validation-and-R3 job, the
+fourth dedicated job historically, using reviewed harness/controller
+`ce6755148f9f4b66d0d9ad49208a8550c0bb0ed1` and unchanged application candidate
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`. Separate one-shot workflow commit
+`7c37d62ad1a83dac544cb16833d0e05b80a26dfe` preserved both older workflow files.
+
+[Run 36818758680](https://github.com/estul26/Contextarium/actions/runs/36818758680)
+failed in 36 seconds. Build, nine controlled wrapper checks, model/VFS checks,
+native/instrumented application controls, replay and all five exact-reason
+negative controls passed. Positive oracle inputs passed before and after the
+controls. An AssertionError then stopped execution after the prerequisite gate,
+before any application matrix schedule/case was logged. The precise assertion
+and M1 fixture-child details were not retained; see the [evidence document](m2-evidence.md).
+
+The new slot is consumed. No source repair, retry, replacement or local substitute
+execution followed. Prerequisite validation PASS is distinct from the overall
+failed run and unexecuted application fault matrix. T18 remains PARTIAL, T30
+BLOCKED, D6/R3 OPEN, M2 acceptance PENDING and PR #6 DRAFT. All four dedicated
+slots are exhausted; any further execution needs separate owner authorization.
