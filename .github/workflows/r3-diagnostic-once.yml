@@ -1,0 +1,128 @@
+name: One-shot R3 no-fault diagnostic
+
+on:
+  push:
+    branches: [m2-implementation]
+    paths: ['.github/workflows/r3-diagnostic-once.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: contextarium-r3-diagnostic-43e382e-once
+  cancel-in-progress: false
+
+jobs:
+  diagnostic:
+    # One additional diagnostic slot only. A setup/build failure consumes it.
+    # The exact previous tip and subject restrict execution to this one push.
+    # Subsequent pushes and all reruns skip; there is no dispatch or schedule.
+    if: >-
+      github.repository == 'estul26/Contextarium' &&
+      github.event.repository.private == false &&
+      github.ref == 'refs/heads/m2-implementation' &&
+      github.event.before == '43e382e43010b7a35f73cc2c001902a5f85fbad7' &&
+      github.event.head_commit.message == 'test: run one-shot no-fault R3 diagnostic' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: '1'
+      CC: gcc
+      REVIEWED_HARNESS: 43e382e43010b7a35f73cc2c001902a5f85fbad7
+      APPLICATION_CANDIDATE: b6f63a7564977555faffe6f9ca6b1a9c22910d43
+    steps:
+      - name: Enforce public standard runner and single consumed slot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          assert os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted'
+          assert os.environ['RUNNER_OS'] == 'Linux'
+          assert os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+          base = 'https://api.github.com/repos/estul26/Contextarium'
+          def read(path):
+              request = urllib.request.Request(base + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+          assert not read('')['private']
+          history = read('/actions/workflows/r3-diagnostic-once.yml/runs?branch=m2-implementation&event=push&per_page=100')
+          assert history['total_count'] == 1, 'The single diagnostic slot is consumed; no replacement permitted'
+          current = history['workflow_runs'][0]
+          assert str(current['id']) == os.environ['GITHUB_RUN_ID']
+          assert current['head_sha'] == os.environ['GITHUB_SHA']
+          print(json.dumps({'kind': 'diagnostic-authorization', 'slot': '1 of 1; consumed on job start',
+              'job_timeout_minutes': 15, 'mode': 'no-fault-diagnostic', 'paid_usage_authorized': 0,
+              'artifact_upload': False, 'cache_upload': False,
+              'workflow_commit': os.environ['GITHUB_SHA'], 'reviewed_harness': os.environ['REVIEWED_HARNESS'],
+              'candidate': os.environ['APPLICATION_CANDIDATE']}, sort_keys=True))
+          PY
+      - name: Check out only the reviewed harness source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 43e382e43010b7a35f73cc2c001902a5f85fbad7
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go without uploaded cache
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Verify pin and build the reviewed diagnostic worker
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$REVIEWED_HARNESS"
+          test -z "$(git status --porcelain)"
+          git diff --exit-code "$APPLICATION_CANDIDATE" -- cmd internal/engine internal/storage internal/server internal/app internal/config go.mod go.sum
+          test -z "$(gofmt -l internal/r3)"
+          go mod download
+          go mod verify
+          r3_diag_build=$(mktemp -d "$RUNNER_TEMP/contextarium-r3-diagnostic-build-XXXXXX")
+          touch "$r3_diag_build/.contextarium-r3-owned"
+          echo "R3_DIAG_BUILD=$r3_diag_build" >> "$GITHUB_ENV"
+          sqlite_dir=$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)
+          test -n "$sqlite_dir"
+          test -f "$sqlite_dir/sqlite3-binding.h"
+          export CGO_CFLAGS="-I$sqlite_dir"
+          go build -tags r3 -o "$r3_diag_build/worker" ./internal/r3/worker
+          python3 - <<'PY'
+          import hashlib, json, os, platform, subprocess
+          from pathlib import Path
+          module = Path(subprocess.check_output(['go','list','-m','-f','{{.Dir}}','github.com/mattn/go-sqlite3'], text=True).strip())
+          names = ['internal/r3/vfs/vfs.c','internal/r3/vfs/vfs.go','internal/r3/worker/main.go','scripts/r3-check.py','go.mod','go.sum']
+          hashes = {name: hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names}
+          hashes.update({name: hashlib.sha256((module/name).read_bytes()).hexdigest() for name in ('sqlite3-binding.c','sqlite3-binding.h')})
+          print(json.dumps({'kind': 'diagnostic-build-manifest',
+              'candidate': os.environ['APPLICATION_CANDIDATE'], 'harness': os.environ['REVIEWED_HARNESS'],
+              'workflow_commit': os.environ['GITHUB_SHA'], 'hashes': hashes,
+              'go': subprocess.check_output(['go','version'], text=True).strip(),
+              'compiler': subprocess.check_output(['gcc','--version'], text=True).splitlines()[0],
+              'architecture': platform.machine(), 'kernel': platform.release(),
+              'runner_image': os.getenv('ImageOS'), 'runner_version': os.getenv('ImageVersion'),
+              'cpu': os.cpu_count(), 'meminfo': Path('/proc/meminfo').read_text().splitlines()[0],
+              'modeled_scratch_limit_gib': 4, 'free_reserve_gib': 2,
+              'artifact_upload': False, 'cache_upload': False}, sort_keys=True))
+          PY
+      - name: Run only the reviewed no-fault diagnostic entry
+        id: diagnostic
+        run: python3 scripts/r3-check.py --mode no-fault-diagnostic --worker "$R3_DIAG_BUILD/worker"
+      - name: Report diagnostic boundary without further execution
+        if: always()
+        env:
+          DIAGNOSTIC_OUTCOME: ${{ steps.diagnostic.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          print(json.dumps({'kind':'diagnostic-only-stop',
+              'diagnostic_step':os.environ['DIAGNOSTIC_OUTCOME'],
+              'slot':'consumed; no rerun or replacement', 'fault_probes':'NOT RUN',
+              'negative_controls':'NOT RUN', 'crash_schedules':'NOT RUN', 'acceptance_matrix':'NOT RUN',
+              'T18':'PARTIAL', 'T30':'BLOCKED', 'D6/R3':'OPEN', 'M2_acceptance':'PENDING',
+              'artifact_upload':False, 'paid_usage_authorized':0}, sort_keys=True))
+          PY
+      # No upload-artifact/cache, acceptance command, fault step, or follow-up job.
+      # Test-owned scratch exists only on this disposable runner; job logs persist.
