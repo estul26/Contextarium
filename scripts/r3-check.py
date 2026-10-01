@@ -39,6 +39,153 @@ LABELS = set(('startup open fixture inspection close settings model-validation c
               'native-write-failed unexpected-mapped-pointer phase-length phase-label').split())
 LABELS.update('mutation-'+op for op in ('create','patch','metadata','archive','unarchive','noop','restore'))
 DIAGNOSTIC_KINDS = {'worker-progress', 'worker-error', 'worker-fatal', 'vfs-operation', 'vfs-fatal'}
+FIXTURE_STAGES = {'launch','readiness','subject','schema','record','update','close'}
+FIXTURE_CODES = {'fixture-http-status','fixture-response-too-large','fixture-http-close',
+                 'fixture-child-exited','fixture-readiness-timeout','fixture-close-timeout',
+                 'fixture-kill-timeout','fixture-exit-nonzero','fixture-wal-remains',
+                 'fixture-signal-failed','fixture-kill-failed','fixture-poll-failed',
+                 'fixture-communicate-failed','fixture-cleanup-failed','fixture-capture-failed',
+                 'fixture-stream-close','fixture-log-failed'}
+M1_API_CODES = {'INVALID_ARGUMENT','NOT_FOUND','CONFLICT','SCHEMA_VALIDATION_FAILED',
+                'UNAVAILABLE','INTERNAL_ERROR','FORBIDDEN','METHOD_NOT_ALLOWED',
+                'PAYLOAD_TOO_LARGE','UNSUPPORTED_MEDIA_TYPE'}
+M1_LOG_CODES = {'configuration rejected':'configuration-rejected',
+                'database initialization failed':'database-initialization-failed',
+                'database close failed':'database-close-failed',
+                'listener initialization failed':'listener-initialization-failed',
+                'application ready':'application-ready',
+                'HTTP serving or shutdown failed':'http-serving-or-shutdown-failed',
+                'application stopped':'application-stopped','application failed':'application-failed'}
+
+
+class FixtureError(AssertionError):
+    def __init__(self, code):
+        assert code in FIXTURE_CODES
+        self.code = code
+        super().__init__(code)
+
+
+def safe_failure(exc, stage='controller', code=None):
+    """Public identifiers contain only fixed codes and this source's locations."""
+    if code is None:
+        code = 'controller-unexpected-error'
+        for cls, label in ((FixtureError, 'fixture-error'), (subprocess.TimeoutExpired, 'controller-timeout'),
+                           (TimeoutError, 'controller-timeout'), (json.JSONDecodeError, 'controller-malformed-json'),
+                           (AttributeError, 'controller-attribute-error'), (KeyError, 'controller-missing-field'),
+                           (StopIteration, 'controller-failed-lookup'), (AssertionError, 'controller-assertion'),
+                           (OSError, 'controller-os-error'), (ValueError, 'controller-invalid-value')):
+            if isinstance(exc, cls):
+                code = exc.code if cls is FixtureError else label
+                break
+    else:
+        assert code in FIXTURE_CODES
+    known_types = {'FixtureError','AssertionError','AttributeError','KeyError','StopIteration',
+                   'JSONDecodeError','TimeoutExpired','TimeoutError','CalledProcessError',
+                   'ConnectionRefusedError','ConnectionResetError','BrokenPipeError','OSError',
+                   'FileNotFoundError','PermissionError','ProcessLookupError','ValueError',
+                   'TypeError','RuntimeError','HTTPException','RemoteDisconnected','IncompleteRead',
+                   'KeyboardInterrupt','SystemExit'}
+    locations = []
+    tb = exc.__traceback__
+    while tb is not None:
+        frame = tb.tb_frame
+        if frame.f_code.co_filename == __file__:
+            name = frame.f_code.co_name
+            # Never publish filenames, source text, exception messages or locals.
+            if re.fullmatch(r'[A-Za-z_][A-Za-z_0-9]{0,63}', name):
+                locations.append({'function':name,'line':tb.tb_lineno})
+            if name == 'm1_fixture' and stage == 'controller':
+                phase = frame.f_locals.get('failure_stage') or frame.f_locals.get('stage')
+                if phase in FIXTURE_STAGES: stage = phase
+        tb = tb.tb_next
+    locations = locations[-4:]
+    point = next((item for item in reversed(locations) if item['function'] not in ('require','__init__')),
+                 {'function':'unknown','line':0})
+    return {'stage':stage if stage in FIXTURE_STAGES | {'controller'} else 'redacted',
+            'error_type':type(exc).__name__ if type(exc).__name__ in known_types else 'OtherError',
+            'error_code':code, 'error_id':f'{code}:{point["function"]}:{point["line"]}',
+            'location':locations}
+
+
+def report_controller_failure(exc):
+    log(kind='FINAL', **IDENTITY, result='FAIL', **safe_failure(exc),
+        reason='safe code and source locations only; raw exception text withheld',
+        T18='PARTIAL',T30='BLOCKED; incomplete harness evidence',R3='OPEN')
+
+
+def m1_log_tail(raw):
+    tail = raw[-65536:]; records = []; suppressed = 0
+    for line in tail.splitlines():
+        try: row = json.loads(line)
+        except (ValueError, UnicodeError): row = None
+        message = row.get('msg') if isinstance(row, dict) else None
+        if not isinstance(message, str) or message not in M1_LOG_CODES:
+            suppressed += 1
+            continue
+        # Even recognized lines may contain private extra fields; discard them.
+        records.append({'code':M1_LOG_CODES[message],
+                        'level':row.get('level') if row.get('level') in ('DEBUG','INFO','WARN','ERROR') else 'redacted'})
+    return {'tail_bytes':len(tail),'tail_sha256':digest(tail),
+            'records':records[-8:],'suppressed_tail_lines':suppressed}
+
+
+def m1_output_bytes(raw):
+    raw = raw or b''
+    if isinstance(raw, str): raw = raw.encode('utf-8', errors='replace')
+    return {'bytes':len(raw),'sha256':digest(raw),'tail_truncated':len(raw)>65536,**m1_log_tail(raw)}
+
+
+def m1_output_file(stream, complete):
+    stream.flush(); size = stream.seek(0, os.SEEK_END); stream.seek(0)
+    checksum = hashlib.sha256(); remaining = size
+    # Hash this finite size snapshot even if a child could not be terminated.
+    while remaining:
+        block = stream.read(min(65536,remaining))
+        if not block:raise FixtureError('fixture-capture-failed')
+        checksum.update(block); remaining -= len(block)
+    stream.seek(max(0,size-65536)); tail = stream.read(min(size,65536))
+    return {'bytes':size,'sha256':checksum.hexdigest(),'complete':complete,
+            'tail_truncated':size>65536,**m1_log_tail(tail)}
+
+
+def close_m1_child(child):
+    """Collect process failures; the caller also guards diagnostic failures."""
+    result = {'controller_termination_performed':False,'signals':[],
+              'natural_exit':exit_status(None),'observed_exit':exit_status(None),
+              'cleanup_errors':[],'communication':[]}
+    def failed(action, exc, code):
+        result['cleanup_errors'].append({'action':action,**safe_failure(exc,'close',code)})
+    def poll():
+        try: return child.poll()
+        except BaseException as exc:
+            failed('poll',exc,'fixture-poll-failed');return None
+    result['natural_exit'] = exit_status(poll())
+    if result['natural_exit'] == exit_status(None):
+        try:
+            child.send_signal(signal.SIGTERM)
+            result['controller_termination_performed'] = True; result['signals'].append('SIGTERM')
+        except BaseException as exc: failed('terminate',exc,'fixture-signal-failed')
+    def communicate(seconds, timeout_code):
+        try:
+            output, stderr = child.communicate(timeout=seconds)
+        except subprocess.TimeoutExpired as exc:
+            result['communication'].append({'complete':False,'stdout':m1_output_bytes(exc.output),
+                                            'stderr':m1_output_bytes(exc.stderr)})
+            failed('communicate',exc,timeout_code);return False
+        except BaseException as exc:
+            failed('communicate',exc,'fixture-communicate-failed');return False
+        result['communication'].append({'complete':True,'stdout':m1_output_bytes(output),
+                                        'stderr':m1_output_bytes(stderr)})
+        return True
+    complete = communicate(10,'fixture-close-timeout')
+    if not complete and poll() is None:
+        try:
+            child.kill()
+            result['controller_termination_performed'] = True; result['signals'].append('SIGKILL')
+        except BaseException as exc: failed('kill',exc,'fixture-kill-failed')
+        communicate(5,'fixture-kill-timeout')
+    result['observed_exit'] = exit_status(poll())
+    return result
 
 
 def safe_diagnostic(row):
@@ -715,39 +862,114 @@ def raw_validation(worker,root):
     log(kind='validation',name='native-VFS-visibility-sync-truncate-namespace',result='PASS')
 
 def m1_fixture(binary,root,empty=False):
-    path=root/'store.db'
-    with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
-    env={k:v for k,v in os.environ.items() if k in ('PATH','LANG','TZ')}
-    env.update(CONTEXTARIUM_LISTEN_ADDR=f'127.0.0.1:{port}',CONTEXTARIUM_DB_PATH=str(path))
-    child=subprocess.Popen([str(binary)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    def http(method,url,body=None,key=None):
-        conn=http.client.HTTPConnection('127.0.0.1',port,timeout=2)
-        headers={'Content-Type':'application/json'}
-        if key:headers['Idempotency-Key']=key
+    path=root/'store.db'; child=None; streams={}; legacy=[]
+    stage='launch'; failure_stage=None; primary=None; secondary=[]; http_info={}
+    fixture='empty' if empty else 'populated'
+    def mark(phase):
+        nonlocal stage
+        stage=phase; http_info.clear()
+        log(kind='m1-fixture-progress',fixture=fixture,stage=stage)
+    def request_http(method,url,body=None,key=None):
+        # The helper must not shadow the imported http package.
+        conn=None; request_error=None; http_info.clear()
         try:
-            conn.request(method,url,body.encode() if body else None,headers);r=conn.getresponse();raw=r.read()
-            require(r.status in (200,201),'M1 fixture HTTP failure')
-            return json.loads(raw) if raw else None
-        finally:conn.close()
+            conn=http.client.HTTPConnection('127.0.0.1',port,timeout=2)
+            headers={'Content-Type':'application/json'}
+            if key:headers['Idempotency-Key']=key
+            conn.request(method,url,body.encode() if body else None,headers)
+            response=conn.getresponse()
+            http_info['status']=response.status if type(response.status) is int and 100<=response.status<=599 else None
+            raw=response.read(128*1024+1)
+            http_info.update(response_bytes=len(raw),response_sha256=digest(raw),response_truncated=len(raw)>128*1024)
+            if len(raw)>128*1024:raise FixtureError('fixture-response-too-large')
+            try: parsed=json.loads(raw) if raw else None
+            except (ValueError,UnicodeError):
+                if response.status not in (200,201):raise FixtureError('fixture-http-status') from None
+                raise
+            error=parsed.get('error') if isinstance(parsed,dict) else None
+            code=error.get('code') if isinstance(error,dict) else None
+            if code is not None:
+                http_info['api_error_code']=code if isinstance(code,str) and code in M1_API_CODES else 'redacted'
+            if response.status not in (200,201):raise FixtureError('fixture-http-status')
+            return parsed
+        except BaseException as exc:
+            request_error=exc
+            raise
+        finally:
+            if conn is not None:
+                try:conn.close()
+                except BaseException as exc:
+                    secondary.append({'action':'http-close',**safe_failure(exc,stage,'fixture-http-close')})
+                    if request_error is None:raise FixtureError('fixture-http-close') from exc
     try:
+        mark('launch')
+        # File-backed child output avoids a full pipe blocking readiness. These
+        # exclusive files belong to the caller's marked fixture directory only.
+        for name in ('stdout','stderr'):streams[name]=(root/('m1-'+name+'.txt')).open('x+b')
+        with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+        env={k:v for k,v in os.environ.items() if k in ('PATH','LANG','TZ')}
+        env.update(CONTEXTARIUM_LISTEN_ADDR=f'127.0.0.1:{port}',CONTEXTARIUM_DB_PATH=str(path))
+        child=subprocess.Popen([str(binary)],env=env,stdout=streams['stdout'],stderr=streams['stderr'])
+        mark('readiness')
         until=time.monotonic()+10
         while True:
-            try:http('GET','/readyz');break
-            except (OSError,AssertionError):
-                require(time.monotonic()<until and child.poll() is None,'M1 readiness');time.sleep(.02)
-        if empty: return []
-        sub=http('POST','/api/v1/subjects','{"kind":"project","display_name":"Synthetic R3 M1"}','subject')['data']['id']
-        http('POST','/api/v1/schemas','{"schema_id":"example.r3","schema_version":1,"definition":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},"migration_policy":"explicit"}','schema')
-        body='{"subject_id":'+json.dumps(sub)+',"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"unknown":["雪",true]}}'
-        old=http('POST','/api/v1/records',body,'legacy-create')['data']
-        http('POST','/api/v1/records',body,'legacy-other')
-        http('PATCH','/api/v1/records/'+old['id'],'{"status":"archived"}','legacy-update')
-        legacy=[{'Operation':'create','Key':'legacy-create','Body':body},{'Operation':'patch','ID':old['id'],'Key':'legacy-update','Body':'{"status":"archived"}'}]
+            if child.poll() is not None:raise FixtureError('fixture-child-exited')
+            try:request_http('GET','/readyz');break
+            except (OSError,FixtureError) as exc:
+                if secondary:raise  # A failed HTTP close is not a readiness retry.
+                if isinstance(exc,FixtureError) and exc.code!='fixture-http-status':raise
+                if child.poll() is not None:raise FixtureError('fixture-child-exited') from exc
+                if time.monotonic()>=until:raise FixtureError('fixture-readiness-timeout') from exc
+                time.sleep(.02)
+        if not empty:
+            mark('subject')
+            sub=request_http('POST','/api/v1/subjects','{"kind":"project","display_name":"Synthetic R3 M1"}','subject')['data']['id']
+            mark('schema')
+            request_http('POST','/api/v1/schemas','{"schema_id":"example.r3","schema_version":1,"definition":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},"migration_policy":"explicit"}','schema')
+            body='{"subject_id":'+json.dumps(sub)+',"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"unknown":["雪",true]}}'
+            mark('record')
+            old=request_http('POST','/api/v1/records',body,'legacy-create')['data']
+            request_http('POST','/api/v1/records',body,'legacy-other')
+            mark('update')
+            request_http('PATCH','/api/v1/records/'+old['id'],'{"status":"archived"}','legacy-update')
+            legacy=[{'Operation':'create','Key':'legacy-create','Body':body},{'Operation':'patch','ID':old['id'],'Key':'legacy-update','Body':'{"status":"archived"}'}]
+    except BaseException as exc:
+        primary=exc; failure_stage=stage
+        try:log(kind='m1-fixture-failure',fixture=fixture,**safe_failure(exc,stage),http=dict(http_info))
+        except BaseException as diagnostic_error:
+            secondary.append({'action':'failure-log',**safe_failure(diagnostic_error,stage,'fixture-log-failed')})
+        raise
     finally:
-        if child.poll() is None:child.send_signal(signal.SIGTERM)
-        child.communicate(timeout=10)
-        require(child.returncode==0,'M1 fixture graceful close')
-    require(not (root/'store.db-wal').exists(),'M1 fixture not closed')
+        stage='close'; cleanup={}; outputs={}
+        if child is not None:
+            try:
+                cleanup=close_m1_child(child)
+                secondary.extend(cleanup.pop('cleanup_errors'))
+                if child.returncode!=0:raise FixtureError('fixture-exit-nonzero')
+            except BaseException as exc:
+                code=exc.code if isinstance(exc,FixtureError) else 'fixture-cleanup-failed'
+                secondary.append({'action':'process-close',**safe_failure(exc,'close',code)})
+            try:
+                if (root/'store.db-wal').exists():raise FixtureError('fixture-wal-remains')
+            except BaseException as exc:
+                code=exc.code if isinstance(exc,FixtureError) else 'fixture-cleanup-failed'
+                secondary.append({'action':'wal-postcondition',**safe_failure(exc,'close',code)})
+        for name,stream in streams.items():
+            try:outputs[name]=m1_output_file(stream,child is not None and child.returncode is not None)
+            except BaseException as exc:
+                secondary.append({'action':'capture-'+name,**safe_failure(exc,'close','fixture-capture-failed')})
+            try:stream.close()
+            except BaseException as exc:
+                secondary.append({'action':'close-'+name,**safe_failure(exc,'close','fixture-stream-close')})
+        try:
+            log(kind='m1-fixture-close',fixture=fixture,stage='close',primary_preserved=primary is not None,
+                **cleanup,outputs=outputs,cleanup_errors=secondary,
+                result='FAIL' if primary is not None or secondary else 'PASS')
+        except BaseException as exc:
+            secondary.append({'action':'close-log',**safe_failure(exc,'close','fixture-log-failed')})
+        # A pending bare raise keeps its original exception/traceback. A close or
+        # WAL failure without a primary is itself fatal for both fixture kinds.
+        if primary is None and secondary:raise FixtureError(secondary[0]['error_code'])
     return legacy
 
 def select_targets(events,operation):
@@ -927,7 +1149,6 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as exc:
-        log(kind='FINAL', **IDENTITY, result='FAIL',error_type=type(exc).__name__,
-            reason='see bounded diagnostic records; raw exception text withheld',
-            T18='PARTIAL',T30='BLOCKED; incomplete harness evidence',R3='OPEN')
+        try:report_controller_failure(exc)
+        except BaseException:pass  # A broken log sink must not expose a raw traceback.
         raise SystemExit(1) from None

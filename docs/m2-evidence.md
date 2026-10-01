@@ -496,6 +496,57 @@ and is not R3 validation. All four dedicated execution slots are consumed.
 Reporting pushes cannot satisfy the new workflow's exact predecessor/message/path
 gates; reruns fail its first-attempt gate. There is no remaining execution allowance.
 
+## M1 fixture source correction — runtime validation NOT RUN
+
+This source-only correction starts from reporting checkpoint
+`2e6d3dc170dc5eca733af2d23d900a5e56aa3b24`. The last executed harness remains
+`ce6755148f9f4b66d0d9ad49208a8550c0bb0ed1`; no additional execution slot was
+authorized or used. The fourth-job failure record above remains unchanged.
+
+Source and Python symbol-table inspection confirm that the nested `http` helper
+shadowed the imported package: its `http.client.HTTPConnection` expression used
+the enclosing function binding rather than the module. Renaming the helper and
+all calls to `request_http` makes `http` resolve globally. This establishes a
+source defect; it does not recover the missing historical exception chain or
+prove which cleanup assertion produced the retained final AssertionError.
+
+Two further source defects are corrected: the old finally block could replace a
+primary failure, and the empty fixture returned before the WAL postcondition.
+The patch preserves a primary exception and traceback, reports cleanup failures
+separately, and makes cleanup-only failure fatal. Both fixture kinds now reach
+the same zero-exit and WAL-absence checks. Intended HTTP methods, paths, request
+bodies, idempotency keys and 200/201 success checks are retained.
+
+Fixture diagnostics identify launch/readiness/subject/schema/record/update/close,
+fixed error codes, HTTP status and allowlisted API error codes. Child output is
+captured in exclusive fixture-owned files, with sizes/hashes and at most eight
+allowlisted records from each 64 KiB tail. Any returned/partial communicate output
+is also summarized, rather than discarded. Natural exit and controller SIGTERM/
+SIGKILL are reported separately; timeout, signal, capture and close failures stay
+secondary when a primary exists. HTTP reads are bounded at 128 KiB plus the
+overflow sentinel; arbitrary response bodies, child messages, environment values,
+SQL, paths and exception text are not published. Top-level failure records add
+fixed error codes and controller function/line locations, with an error identifier
+tied to those locations in the reported harness source.
+
+[Focused regression source](../scripts/test_r3_fixture.py) prepares 16 fake-only
+tests: module resolution and intended requests; primary plus process/HTTP cleanup
+failure; cleanup-only failure; readiness timeout/early exit; populated and empty
+clean-close/WAL checks; safe API status/code reporting; bounded sensitive-output
+redaction; launch failure and diagnostic-sink failure. **All 16 tests are NOT RUN.**
+They are not wired into ordinary CI. No controller/test import, harness build,
+fixture binary, probe, negative control or fault schedule was executed for this
+patch, and no Actions job was manually dispatched or rerun.
+
+Static checks cover AST parsing, before/after symbol resolution, whitespace,
+scope/public-content review, and unchanged storage model, oracle, replay,
+negative-control and main-function ASTs. Application code, migrations,
+dependencies, approved contracts, ordinary CI and every existing workflow gate
+remain unchanged. Runtime behavior of the correction, the prepared regressions,
+real M1 fixture closure and all outstanding application fault coverage remain
+unverified. T18 **PARTIAL**, T30 **BLOCKED**, D6/R3 **OPEN**, M2 acceptance
+**PENDING**, PR #6 **DRAFT**, additional execution slots **ZERO**.
+
 ## Review boundary
 
 Architecture deviations: **NONE**. D1–D5 are retained. Migration 001/002, dependencies,
