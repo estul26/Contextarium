@@ -8,8 +8,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include "wal_geometry.h"
 
-typedef struct { sqlite3_file base; sqlite3_file *real; char name[32]; } RFile;
+typedef struct { sqlite3_file base; sqlite3_file *real; char name[32]; R3WalGeometry wal; } RFile;
 static sqlite3_vfs shim, *native;
 static FILE *logfile;
 static char rootdir[PATH_MAX], phase[64]="startup", fault[32];
@@ -34,12 +35,15 @@ static const char* role(const char *name) {
  if(strstr(name,"-journal")) return "journal";
  return "database";
 }
-static long pre(const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
+static long pre(const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data,const R3WalGeometry *g) {
  long id=++sequence;
  /* Metadata is separate from the private, byte-bearing reconstruction trace. */
  if(fprintf(stderr,"{\"kind\":\"vfs-operation\",\"seq\":%ld,\"stage\":\"pre\",\"phase\":\"%s\",\"op\":\"%s\",\"role\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d}\n",id,phase,op,role(name),(long long)off,n,flags)<0 || fflush(stderr)) die("metadata-write");
  if(fprintf(logfile,"{\"seq\":%ld,\"stage\":\"pre\",\"phase\":\"%s\",\"op\":\"%s\",\"name\":\"%s\",\"role\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d,\"hex\":\"",id,phase,op,name,role(name),(long long)off,n,flags)<0) die("trace-write");
  if(data) for(int i=0;i<n;i++) if(fprintf(logfile,"%02x",((const unsigned char*)data)[i])<0) die("trace-write");
+ if(fputs("\",\"wal_header\":\"",logfile)==EOF)die("trace-write");
+ if(g && !strcmp(role(name),"wal") && g->page_size)
+  for(int i=0;i<32;i++)if(fprintf(logfile,"%02x",g->header[i])<0)die("trace-write");
  if(fputs("\"}\n",logfile)==EOF || fflush(logfile)) die("trace-flush");
  return id;
 }
@@ -53,22 +57,21 @@ static void reached(long id) {
 static void pause_here(void) { char c; if(read(STDIN_FILENO,&c,1)!=1) die("barrier-input-eof"); die("unexpected-barrier-release"); }
 /* Classify the pending operation before any native write/sync/truncate. No page
  * bytes cross the public decision protocol. The private trace still has bytes. */
-static const char* semantic(const char *op,const char *name,sqlite3_int64 off,int n,const void *data) {
- if(strcmp(op,"write") || strcmp(role(name),"wal")) return op;
- if(off==0) return "wal-header-reset";
- if(n==24 && data) {
-  const unsigned char *p=data;
-  if(p[4] || p[5] || p[6] || p[7]) return "wal-commit-marker";
- }
- return "wal-frame";
+static const char* semantic(const char *op,const char *name,sqlite3_int64 off,int n,const void *data,const R3WalGeometry *g,uint32_t *size) {
+ *size=0;
+ if(strcmp(role(name),"wal"))return op;
+ *size=g->page_size;
+ if(strcmp(op,"write"))return op;
+ return r3_wal_classify(g,data,n,off,size);
 }
-static void decide(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
+static void decide(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data,const R3WalGeometry *g) {
  if(target || !strcmp(fault,"none")) return;
  /* One pending I/O at a time. The controller verifies its planned descriptor
   * and Nth stable-selector group position before replying. An EOF/bad/stale
   * reply exits without performing this operation or injecting a fault elsewhere. */
- if(printf("{\"kind\":\"io-candidate\",\"seq\":%ld,\"phase\":\"%s\",\"op\":\"%s\",\"name\":\"%s\",\"role\":\"%s\",\"meaning\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d}\n",
-    id,phase,op,name,role(name),semantic(op,name,off,n,data),(long long)off,n,flags)<0 || fflush(stdout)) die("protocol-write");
+ uint32_t page_size;const char *meaning=semantic(op,name,off,n,data,g,&page_size);
+ if(printf("{\"kind\":\"io-candidate\",\"seq\":%ld,\"phase\":\"%s\",\"op\":\"%s\",\"name\":\"%s\",\"role\":\"%s\",\"meaning\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d,\"wal_page_size\":%u}\n",
+    id,phase,op,name,role(name),meaning,(long long)off,n,flags,page_size)<0 || fflush(stdout)) die("protocol-write");
  char reply[64];size_t used=0;
  do {
   if(used==sizeof(reply)-1)die("decision-reply-invalid");
@@ -79,8 +82,8 @@ static void decide(long id,const char *op,const char *name,sqlite3_int64 off,int
  if(sscanf(reply,"%c %ld %c",&action,&acknowledged,&extra)!=2 || acknowledged!=id || (action!='c' && action!='i'))die("decision-reply-invalid");
  if(action=='i')target=id;
 }
-static int before(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
- decide(id,op,name,off,n,flags,data);
+static int before(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data,const R3WalGeometry *g) {
+ decide(id,op,name,off,n,flags,data,g);
  if(id!=target) return 0;
  if(!strcmp(fault,"cut-after")) return 0;
  reached(id);
@@ -91,15 +94,23 @@ static int before(long id,const char *op,const char *name,sqlite3_int64 off,int 
 }
 static void after(long id) {if(id==target && !strcmp(fault,"cut-after")){reached(id);pause_here();}}
 static int close_file(sqlite3_file *f) {RFile *p=(RFile*)f;int rc=p->real->pMethods->xClose(p->real);sqlite3_free(p->real);p->base.pMethods=0;return rc;}
-static int read_file(sqlite3_file *f,void *b,int n,sqlite3_int64 o){RFile*p=(RFile*)f;reads++;return p->real->pMethods->xRead(p->real,b,n,o);}
+static int read_file(sqlite3_file *f,void *b,int n,sqlite3_int64 o){
+ RFile*p=(RFile*)f;reads++;int rc=p->real->pMethods->xRead(p->real,b,n,o);
+ /* Learn only from SQLite's own successful header read; add no native I/O. */
+ if(!strcmp(role(p->name),"wal") && o<32){
+  if(rc==SQLITE_OK)r3_wal_observe(&p->wal,b,n,o);else r3_wal_forget(&p->wal);
+ }
+ return rc;
+}
 static int write_file(sqlite3_file *f,const void *b,int n,sqlite3_int64 o){
- RFile*p=(RFile*)f;long id=pre("write",p->name,o,n,0,b);int rc=before(id,"write",p->name,o,n,0,b),applied=0;
+ RFile*p=(RFile*)f;long id=pre("write",p->name,o,n,0,b,&p->wal);int rc=before(id,"write",p->name,o,n,0,b,&p->wal),applied=0;
  if(rc && id==target && !strcmp(fault,"partial")){applied=n/2;int inner=p->real->pMethods->xWrite(p->real,b,applied,o);if(inner!=SQLITE_OK)die("native-partial-write-failed");}
  else if(!rc){rc=p->real->pMethods->xWrite(p->real,b,n,o);if(rc==SQLITE_OK)applied=n;else die("native-write-failed");}
+ if(!strcmp(role(p->name),"wal"))r3_wal_observe(&p->wal,b,applied,o);
  post(id,rc,applied);after(id);return rc;
 }
-static int truncate_file(sqlite3_file*f,sqlite3_int64 size){RFile*p=(RFile*)f;long id=pre("truncate",p->name,size,0,0,0);int rc=before(id,"truncate",p->name,size,0,0,0);if(!rc)rc=p->real->pMethods->xTruncate(p->real,size);post(id,rc,rc==0);after(id);return rc;}
-static int sync_file(sqlite3_file*f,int flags){RFile*p=(RFile*)f;long id=pre("sync",p->name,0,0,flags,0);int rc=before(id,"sync",p->name,0,0,flags,0);if(!rc)rc=p->real->pMethods->xSync(p->real,flags);post(id,rc,rc==0);after(id);return rc;}
+static int truncate_file(sqlite3_file*f,sqlite3_int64 size){RFile*p=(RFile*)f;long id=pre("truncate",p->name,size,0,0,0,&p->wal);int rc=before(id,"truncate",p->name,size,0,0,0,&p->wal);if(!rc)rc=p->real->pMethods->xTruncate(p->real,size);if(!rc && !strcmp(role(p->name),"wal"))r3_wal_truncated(&p->wal,size);post(id,rc,rc==0);after(id);return rc;}
+static int sync_file(sqlite3_file*f,int flags){RFile*p=(RFile*)f;long id=pre("sync",p->name,0,0,flags,0,&p->wal);int rc=before(id,"sync",p->name,0,0,flags,0,&p->wal);if(!rc)rc=p->real->pMethods->xSync(p->real,flags);post(id,rc,rc==0);after(id);return rc;}
 static int size_file(sqlite3_file*f,sqlite3_int64*n){RFile*p=(RFile*)f;return p->real->pMethods->xFileSize(p->real,n);}
 static int lock_file(sqlite3_file*f,int n){RFile*p=(RFile*)f;return p->real->pMethods->xLock(p->real,n);}
 static int unlock_file(sqlite3_file*f,int n){RFile*p=(RFile*)f;return p->real->pMethods->xUnlock(p->real,n);}
@@ -126,11 +137,11 @@ static int open_file(sqlite3_vfs*v,const char*name,sqlite3_file*f,int flags,int*
  (void)v;const char *shortname=basename_checked(name);RFile*p=(RFile*)f;memset(p,0,sizeof(*p));strcpy(p->name,shortname);
  p->real=sqlite3_malloc(native->szOsFile);if(!p->real)return SQLITE_NOMEM;memset(p->real,0,native->szOsFile);
  int exists=0;native->xAccess(native,name,SQLITE_ACCESS_EXISTS,&exists);
- long id=pre("open",shortname,0,0,exists,0);int rc=native->xOpen(native,name,p->real,flags,out);
+ long id=pre("open",shortname,0,0,exists,0,&p->wal);int rc=native->xOpen(native,name,p->real,flags,out);
  if(p->real->pMethods)p->base.pMethods=&methods;else{sqlite3_free(p->real);p->real=0;}
  post(id,rc,rc==0 && !exists);return rc;
 }
-static int delete_file(sqlite3_vfs*v,const char*name,int syncdir){(void)v;const char*n=basename_checked(name);long id=pre("delete",n,0,0,syncdir,0);int rc=native->xDelete(native,name,syncdir);post(id,rc,rc==0);return rc;}
+static int delete_file(sqlite3_vfs*v,const char*name,int syncdir){(void)v;const char*n=basename_checked(name);long id=pre("delete",n,0,0,syncdir,0,0);int rc=native->xDelete(native,name,syncdir);post(id,rc,rc==0);return rc;}
 int r3_init(const char*root,const char*trace,const char*mode,int unit){
  if(strlen(root)>=sizeof(rootdir) || strlen(mode)>=sizeof(fault) || (unit!=512 && unit!=4096)) return 1;
  if(strcmp(mode,"none") && strcmp(mode,"cut-before") && strcmp(mode,"cut-after") && strcmp(mode,"ioerr") && strcmp(mode,"full") && strcmp(mode,"partial")) return 1;

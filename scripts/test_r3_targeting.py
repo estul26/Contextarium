@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from r3_wal_test_vectors import wal_header, frame_header, frame_offset, page_offset
+
 
 class TargetingTests(unittest.TestCase):
     def setUp(self):
@@ -28,12 +30,16 @@ class TargetingTests(unittest.TestCase):
         self.sink=io.BytesIO()
 
     def event(self, seq=47, *, phase='mutation-noop', name='store.db-wal',
-              op='write', offset=86552, length=24, flags=0, commit=True):
-        data=bytearray(length) if op=='write' else bytearray()
-        if commit and len(data)==24:data[7]=1
+              op='write', offset=None, length=24, flags=0, commit=True, page_size=4096):
+        if offset is None:offset=frame_offset(21,page_size) if length==24 else page_offset(21,page_size)
+        data=bytes(length) if op=='write' else b''
+        if op=='write' and name.endswith('-wal'):
+            if offset==0 and length==32:data=wal_header(page_size)
+            elif length==24:data=frame_header(page_size,commit=commit)
         return dict(seq=seq,stage='pre',phase=phase,name=name,
                     role='wal' if name.endswith('-wal') else ('journal' if name.endswith('-journal') else 'database'),op=op,
-                    offset=offset,length=length,flags=flags,hex=data.hex())
+                    offset=offset,length=length,flags=flags,hex=data.hex(),
+                    wal_header=wal_header(page_size).hex() if name.endswith('-wal') else '')
 
     def message(self, event):
         return dict(self.c.event_descriptor(event),seq=event['seq'],kind='io-candidate')
@@ -51,7 +57,7 @@ class TargetingTests(unittest.TestCase):
         matcher=self.c.TargetMatcher(self.plan())
         self.deliver(matcher,self.event(8,phase='open'))
         self.deliver(matcher,self.event(17,op='sync',offset=0,length=0,flags=2))
-        self.deliver(matcher,self.event(25,offset=32,length=4096,commit=False))
+        self.deliver(matcher,self.event(25,offset=56,length=4096,commit=False))
         self.deliver(matcher,self.event(91))
         self.assertEqual(self.sink.getvalue(),b'c 8\nc 17\nc 25\ni 91\n')
         matcher.require_reached({'seq':91})
@@ -78,7 +84,7 @@ class TargetingTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.sink=io.BytesIO();original=self.event(name=name)
                 matcher=self.c.TargetMatcher(self.plan([original]))
-                self.deliver(matcher,dict(original,offset=90000))
+                self.deliver(matcher,dict(original,offset=94792))
                 self.assertEqual(self.sink.getvalue(),b'i 47\n' if allowed else b'c 47\n')
                 self.assertEqual(matcher.seen,int(allowed))
                 if not allowed:
@@ -87,7 +93,7 @@ class TargetingTests(unittest.TestCase):
 
     def test_first_commit_marker_at_different_append_offset_is_selected(self):
         plan=self.plan([self.event(39,offset=70072),self.event(41,offset=74192),
-                        self.event(42,offset=74216)])
+                        self.event(42,offset=78312)])
         self.assertEqual(plan['samples'],['first'])
         self.assertEqual(plan['group_position'],1)
         self.assertEqual(plan['group_count'],3)
@@ -136,7 +142,7 @@ class TargetingTests(unittest.TestCase):
     def test_different_append_length_is_a_different_group(self):
         plan=self.plan([self.event(length=4096,commit=False)])
         matcher=self.c.TargetMatcher(plan)
-        self.deliver(matcher,self.event(offset=90000,length=2048,commit=False))
+        self.deliver(matcher,self.event(offset=94816,length=2048,commit=False))
         self.assertEqual(self.sink.getvalue(),b'c 47\n')
         self.assertEqual(matcher.seen,0)
         with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
@@ -145,7 +151,7 @@ class TargetingTests(unittest.TestCase):
     def test_commit_marker_requires_24_byte_shape(self):
         matcher=self.c.TargetMatcher(self.plan());message=self.message(self.event())
         message['length']=23
-        with self.assertRaisesRegex(AssertionError,'invalid WAL commit-marker shape'):
+        with self.assertRaisesRegex(AssertionError,'invalid WAL frame-header geometry'):
             self.c.decide_io(self.sink,self.trace,matcher,message,[])
         self.assertEqual(self.sink.getvalue(),b'')
 
@@ -153,14 +159,14 @@ class TargetingTests(unittest.TestCase):
         header=self.event(offset=0,length=32,commit=False)
         matcher=self.c.TargetMatcher(self.plan([header]));message=self.message(header)
         message['offset']=32
-        with self.assertRaisesRegex(AssertionError,'WAL header/append offset mismatch'):
+        with self.assertRaisesRegex(AssertionError,'invalid WAL reset geometry'):
             self.c.decide_io(self.sink,self.trace,matcher,message,[])
         self.assertEqual(self.sink.getvalue(),b'')
 
     def test_wal_append_cannot_claim_offset_zero(self):
         matcher=self.c.TargetMatcher(self.plan());message=self.message(self.event())
         message['offset']=0
-        with self.assertRaisesRegex(AssertionError,'WAL header/append offset mismatch'):
+        with self.assertRaisesRegex(AssertionError,'missing WAL frame geometry'):
             self.c.decide_io(self.sink,self.trace,matcher,message,[])
         self.assertEqual(self.sink.getvalue(),b'')
 
@@ -189,7 +195,7 @@ class TargetingTests(unittest.TestCase):
     def test_append_flags_remain_identity(self):
         event=self.event()
         matcher=self.c.TargetMatcher(self.plan([event]))
-        changed=dict(event,offset=90000,flags=1)
+        changed=dict(event,offset=94792,flags=1)
         self.assertNotEqual(self.c.target_group(self.message(event)),self.c.target_group(self.message(changed)))
         self.deliver(matcher,changed)
         self.assertEqual(self.sink.getvalue(),b'c 47\n')
@@ -198,31 +204,31 @@ class TargetingTests(unittest.TestCase):
             matcher.require_reached(None)
 
     def test_mixed_selector_group_plan_is_rejected(self):
-        header=self.event(10,offset=4000,commit=False)
+        header=self.event(10,offset=4152,commit=False)
         page=self.event(47,length=4096,commit=False)
         with self.assertRaisesRegex(AssertionError,'mixed target selector group'):
             self.plan([header,page],1)
         self.assertEqual(self.sink.getvalue(),b'')
 
     def test_append_group_accepts_geometry_but_enforces_nth_position(self):
-        items=[self.event(10,offset=4000),self.event(47)]
+        items=[self.event(10,offset=4152),self.event(47)]
         matcher=self.c.TargetMatcher(self.plan(items,1))
-        self.deliver(matcher,self.event(20,offset=6000))
+        self.deliver(matcher,self.event(20,offset=8272))
         self.assertEqual(self.sink.getvalue(),b'c 20\n')
         self.assertIsNone(matcher.selected_seq)
-        self.deliver(matcher,self.event(80,offset=90000))
+        self.deliver(matcher,self.event(80,offset=94792))
         self.assertEqual(self.sink.getvalue(),b'c 20\ni 80\n')
         self.assertEqual(matcher.seen,2)
         self.assertEqual([c.kwargs['group_position'] for c in self.log.call_args_list],[2])
         self.assertEqual([c.kwargs['baseline']['seq'] for c in self.log.call_args_list],[47])
 
     def test_indistinguishable_append_members_resolve_only_by_group_position(self):
-        plan=self.plan([self.event(10,offset=4000),self.event(47)],1)
+        plan=self.plan([self.event(10,offset=4152),self.event(47)],1)
         matcher=self.c.TargetMatcher(plan)
         # There is deliberately no hidden transaction/page identity. An extra
         # identical selector counts as a member; the explicit second one wins.
-        self.deliver(matcher,self.event(11,offset=5000))
-        self.deliver(matcher,self.event(12,offset=6000))
+        self.deliver(matcher,self.event(11,offset=4152))
+        self.deliver(matcher,self.event(12,offset=8272))
         self.assertEqual(self.sink.getvalue(),b'c 11\ni 12\n')
         self.assertEqual(matcher.selected_seq,12)
 
@@ -239,7 +245,7 @@ class TargetingTests(unittest.TestCase):
         self.assertFalse(matcher.decision_sent)
 
     def test_descriptor_and_private_trace_verified_before_injection_command(self):
-        matcher=self.c.TargetMatcher(self.plan());event=self.event(88,offset=90000)
+        matcher=self.c.TargetMatcher(self.plan());event=self.event(88,offset=94792)
         self.trace.write_text(json.dumps(event)+'\n')
         ordering=[];verify=self.c.verify_pending_trace
         def checking(trace,message):
@@ -264,7 +270,7 @@ class TargetingTests(unittest.TestCase):
         matcher=self.c.TargetMatcher(self.plan())
         self.trace.write_text(json.dumps(self.event())+'\n')
         with self.assertRaisesRegex(AssertionError,'pending trace descriptor mismatch'):
-            self.c.decide_io(self.sink,self.trace,matcher,self.message(self.event(offset=90000)),[])
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(self.event(offset=94792)),[])
         self.assertEqual(self.sink.getvalue(),b'')
         self.assertFalse(matcher.trace_verified)
         self.assertFalse(matcher.decision_sent)
@@ -272,7 +278,7 @@ class TargetingTests(unittest.TestCase):
     def test_malformed_private_trace_cannot_authorize_injection(self):
         matcher=self.c.TargetMatcher(self.plan());self.trace.write_text('{\n')
         with self.assertRaises(json.JSONDecodeError):
-            self.c.decide_io(self.sink,self.trace,matcher,self.message(self.event(offset=90000)),[])
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(self.event(offset=94792)),[])
         self.assertEqual(self.sink.getvalue(),b'')
         self.assertFalse(matcher.decision_sent)
 
@@ -321,10 +327,10 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(self.sink.getvalue(),b'c 47\n')
 
     def test_first_middle_last_selection_preserves_all_positions(self):
-        frames=[self.event(i+10,offset=100+i*4096,length=4096,commit=False) for i in range(5)]
+        frames=[self.event(i+10,offset=page_offset(i),length=4096,commit=False) for i in range(5)]
         sync=self.event(20,op='sync',offset=0,length=0,flags=2)
         targets=self.c.select_targets(frames+[sync,self.event(21)],'noop')
-        frame_plans=[p for _,p in targets if p['descriptor']['meaning']=='wal-frame']
+        frame_plans=[p for _,p in targets if p['descriptor']['meaning']=='wal-page-data']
         self.assertEqual([p['baseline_seq'] for p in frame_plans],[10,12,14])
         self.assertEqual([p['samples'] for p in frame_plans],[['first'],['middle'],['last']])
         self.assertEqual([p['group_position'] for p in frame_plans],[1,3,5])
@@ -357,7 +363,7 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(matcher.seen,2)
 
     def test_group_key_is_exactly_the_selector_policy(self):
-        items=[self.event(),self.event(offset=99999),self.event(length=4096),
+        items=[self.event(),self.event(offset=98912),self.event(length=4096),
                self.event(flags=1),self.event(offset=0,length=32),
                self.event(name='store.db'),self.event(name='store.db-journal'),
                self.event(op='truncate',offset=0,length=0),
@@ -519,7 +525,7 @@ class TargetingTests(unittest.TestCase):
             for sector in (512,4096):
                 events=[self.event(1,name='store.db',length=4096),
                         self.event(2,name='store.db',op='sync',offset=0,length=0),
-                        self.event(3,op='truncate',offset=0,length=0),self.event(4,offset=0)]
+                        self.event(3,op='truncate',offset=0,length=0),self.event(4,offset=0,length=32)]
                 plans=[(None,self.plan([e])) for e in events]
                 coverage.plan(op,sector,plans)
                 for _,plan in plans:

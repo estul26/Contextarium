@@ -16,9 +16,14 @@ stable-prefix check after 399 cases / 1,995 recoveries. T18 PARTIAL, T30 BLOCKED
 D6/R3 OPEN; all seven slots consumed. Earlier source-review/run records below
 retain their historical checkpoint status.
 
-Latest source-only proposal: [target grouping v3](#target-grouping-v3--source-review-only).
+Previous source-only proposal: [target grouping v3](#target-grouping-v3--source-review-only).
 Its 52 prepared targeting tests and all runtime behavior are **NOT RUN** at this
 revision. Historical passing tests above apply to the seventh run's source only.
+
+Latest source-only correction: [WAL format classifier](#wal-format-classifier--source-review-only).
+Its 26 new classifier tests and 52 updated targeting tests are **NOT RUN**.
+Historical semantic labels affected by the old classifier require re-evaluation;
+raw fault/recovery observations do not establish semantic commit boundaries.
 
 ## Execution boundary
 
@@ -1473,6 +1478,136 @@ fresh/empty-M1 initialization, checkpoint/database writes/sync/truncation/WAL
 reset and survival of newly acknowledged effects. All 399 seventh-run completed
 cases had zero acknowledgements; that remains an acceptance gap. V3 grouping,
 prepared tests and revised ordering require separately authorized execution.
+**T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
+additional execution slots ZERO.** Architecture deviations: **NONE**.
+
+## WAL format classifier — source review only
+
+Prepared from `8f7a469a3d20507e8cfe6fbe940523e6d45a5071`; the containing commit
+and PR identify the correction. No execution was authorized or performed.
+Application remains `b6f63a7564977555faffe6f9ca6b1a9c22910d43`; last executed
+harness remains `9be4ed2d87abbfce968dcb737338dc2554878229`.
+
+### Source-supported defect and format rule
+
+Both old classifiers treated a 24-byte positive-offset write with nonzero bytes
+4–7 as a commit marker without checking frame alignment. At page size 4,096,
+offset **56** is page data, so this rule can misclassify an ordinary page fragment.
+This is a static counterexample, **not** a reconstruction of the seventh run's
+missing expected prefix member or proof of its historical root cause.
+
+The pinned go-sqlite3 v1.14.52 amalgamation (SQLite 3.53.4, SHA-256
+`eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00`)
+defines the format in its WAL-file comment, `walFrameOffset`, `walIndexRecover`,
+`walEncodeFrame`, `walWriteOneFrame` and `walWriteToLog`. It agrees with the
+[SQLite WAL format](https://www.sqlite.org/fileformat2.html#walformat): 32-byte
+WAL header, then frames of 24-byte header plus database-page-size bytes. Header
+starts are `32 + N * (page_size + 24)`; page data starts 24 bytes later. The
+bundled `walWriteToLog` can split a write at a sync point, so length alone cannot
+identify either boundary.
+
+The test-only C helper and independent Python classifier now validate WAL-header
+magic, version, power-of-two database page size **512–65,536**, and the header
+checksum in the byte order selected by its magic. A marker label additionally
+requires exact frame-header alignment, a complete 24-byte header, nonzero page
+number, matching current WAL salts and nonzero database-size field. A complete
+aligned non-commit header is `wal-frame`; page-contained data/fragments are
+`wal-page-data`. Modeled device sector size is not an input to this calculation.
+
+This labels the **requested complete header write**, not a verified complete
+frame/checksum chain, a successful transaction or client acknowledgement. A
+partial fault on that request still records the actual applied bytes/error;
+it does not become evidence that all 24 bytes or the page were persisted.
+The existing recovery oracle and external acknowledgement ledger retain their
+separate roles.
+
+### Geometry context, reset and unsupported shapes
+
+Each WAL file handle begins with unknown geometry. The VFS observes only bytes
+already returned by SQLite's existing successful header reads or applied by
+its intercepted writes. It adds no reads, recursive SQLite calls or settings
+queries. Fresh initialization obtains pending reset geometry from the complete
+32-byte header being written; successful application installs that context for
+following frames. Existing WAL files can establish context through SQLite's
+own full header read. WAL reset/reuse replaces the stored header/page size/salts.
+A new file handle never inherits the old handle's context.
+
+A header-overlapping partial observation invalidates the context; split header
+parts are **not** assembled speculatively. A write applying zero bytes leaves
+context unchanged. Successful truncate below 32 bytes invalidates it; a retained
+complete header keeps it. Failed header reads clear the context. If no validated
+context is observed before a frame write, its label is `wal-unknown`, never a
+commit marker. This conservative path can leave required semantic coverage
+missing and must fail acceptance; no runtime confirmation of all paths exists.
+
+Split frame-header writes are `wal-frame-fragment`, partial WAL headers are
+`wal-header-fragment`, and mixed/cross-boundary/invalid shapes are `wal-raw`.
+They remain selectable **raw write fault** targets, with exact offsets. They
+cannot satisfy the required complete commit-marker target. Supporting a future
+unsupported shape would require a reviewed correction, not a skip or relabeling.
+
+Private pre-trace rows retain the current validated header bytes alongside the
+pending operation; the public protocol carries only the bounded page-size
+integer. Python independently validates those header bytes and recomputes the
+semantic label from exact live geometry and private write bytes before injection.
+`wal_page_size` is an additional exact descriptor/selector field, preventing
+cross-page-size matching. V3 grouping from the selector, Nth-member resolution,
+exact live pre/post trace checks, length/flags and strict offsets are retained.
+Validated page-data writes inherit the positive-WAL-offset geometry policy;
+unknown, mixed and partial-header shapes stay strict. No bytes/salts are added
+to public diagnostics.
+
+### Prepared tests and static evidence
+
+**78 classifier/targeting tests prepared, NOT RUN:** 26 new methods in
+`test_r3_wal_classifier.py` plus the 52 targeting methods with corrected format
+fixtures. The unchanged 16 fixture tests are also NOT RUN in this pass
+(**94 methods** across the three suites, not an executed count).
+
+Prepared cases cover valid commit/non-commit headers, offset 56 and other
+24-byte page fragments, all supported page sizes, independent sector sizes,
+both header checksum byte orders, invalid header fields/checksum, frame/page
+splits, mixed writes, unknown context, reset/reuse, partial/zero-applied header
+writes, truncate/reopen/read context, old salts and exact pre-injection checks.
+The new suite, if separately authorized later, builds a small bridge to the
+same pure C helper used by the VFS. Both C and Python must match explicit
+format-derived expectations; agreement between them alone is insufficient.
+That bridge was **not built or loaded** in this pass. Synthetic fixture builders
+supply valid headers, salts and first-frame checksums; later-frame grouping
+fixtures assert geometry and do not pretend to establish checksum-chain history.
+Existing acknowledgement/completeness assertions are retained.
+
+Static checks actually performed:
+
+- Python AST parsing of controller, both targeting/classifier suites, synthetic
+  builders and unchanged fixture suite; no imports or test execution.
+- AST comparison confirms model, oracle, replay, Nth matcher, pre/post trace
+  verification, acknowledgement recording, acceptance guards, prerequisites,
+  checkpoint-first matrix, fault modes and recovery schedules unchanged.
+- `gofmt -l internal/r3`: no output. C `-std=c99 -Wall -Wextra -Werror
+  -fsyntax-only` on the VFS with the pinned bundled SQLite header and on the
+  literal regression bridge; no executable/shared library or tagged build.
+- Whitespace, scope, public-content and production-source equality review;
+  every workflow gate, ordinary CI, dependencies, migrations and D1–D5 unchanged.
+
+### Historical qualification and open gates
+
+All historical counts, outcomes, manifests and failed-case records remain
+intact, including seventh-run **399 cases / 1,995 recoveries** and failed
+`noop-s512-b44-full` with **no injection/recovery result**. **Semantic labels
+potentially affected by the old classifier need re-evaluation.** No cases are
+retroactively relabeled without the necessary retained bytes/context. Raw
+fault/recovery observations and claims of semantic commit-boundary coverage are
+not interchangeable; the complete historical runtime cause remains unproven.
+
+The new classifier, updated fixtures and regressions have no execution evidence.
+Complete no-op, restore, migration/adoption, initialization, checkpoint/WAL-reset
+and newly acknowledged-effect coverage remain open. Checkpoint-first ordering,
+every family/sector/selected fault mode, all five recoveries, successful-sync
+guarantees and complete-response external-ledger acknowledgement gates remain
+unchanged. Historical cases cannot fill a future candidate's completeness count.
+Ordinary automatic PR CI is not R3 validation. No dedicated job, test, tagged
+harness, fixture binary, probe, negative control or fault schedule was executed.
 **T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
 additional execution slots ZERO.** Architecture deviations: **NONE**.
 

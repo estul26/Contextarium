@@ -522,7 +522,7 @@ def inspect(worker, path):
 # Discovery keeps the approved first/middle/last samples. Sequence numbers only
 # identify trace rows. Full descriptors remain evidence; only the explicitly
 # projected selector and Nth member of that exact selector group identify a target.
-TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags')
+TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags','wal_page_size')
 TARGET_POLICY = 'stable-selector-group-nth-v3'
 FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
 REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
@@ -533,15 +533,54 @@ RECOVERY_SCHEDULES = (('discard',17),('retain',17),('reorder-torn',17),
                       ('reorder-torn',29),('reorder-torn',101))
 
 
+def wal_header_page_size(data):
+    # Pinned SQLite WAL header: big-endian fields, checksum order from magic.
+    if len(data)<32:return 0
+    words=[int.from_bytes(data[i:i+4],'big') for i in range(0,32,4)]
+    magic,version,size=words[:3]
+    if magic not in (0x377f0682,0x377f0683) or version!=3007000 or not valid_page_size(size):return 0
+    order='big' if magic&1 else 'little';a=b=0
+    for i in range(0,24,8):
+        a=(a+int.from_bytes(data[i:i+4],order)+b)&0xffffffff
+        b=(b+int.from_bytes(data[i+4:i+8],order)+a)&0xffffffff
+    return size if [a,b]==words[6:8] else 0
+
+
+def valid_page_size(size):
+    return type(size) is int and 512<=size<=65536 and size&(size-1)==0
+
+
+def wal_write_classification(data, offset, header):
+    size=wal_header_page_size(header)
+    require(not header or size,'invalid private WAL geometry header')
+    n=len(data)
+    if offset<0 or n<=0:return 'wal-raw',size
+    if offset<32:
+        pending=wal_header_page_size(data) if offset==0 else 0
+        if offset==0 and n==32 and pending:return 'wal-header-reset',pending
+        return ('wal-header-fragment' if offset+n<=32 and (offset!=0 or n<32) else 'wal-raw'),size
+    if not size:return 'wal-unknown',0
+    within=(offset-32)%(size+24)
+    if within>=24:return ('wal-page-data' if n<=size+24-within else 'wal-raw'),size
+    if within!=0 or n!=24:return ('wal-frame-fragment' if n<=24-within else 'wal-raw'),size
+    if int.from_bytes(data[:4],'big')==0 or data[8:16]!=header[16:24]:return 'wal-raw',size
+    return ('wal-commit-marker' if int.from_bytes(data[4:8],'big') else 'wal-frame'),size
+
+
 def event_descriptor(event):
-    op=event['op'];meaning=op
-    if op=='write' and event['role']=='wal':
-        data=bytes.fromhex(event['hex'])
-        require(len(data)==event['length'],'target trace write length')
-        meaning='wal-header-reset' if event['offset']==0 else 'wal-frame'
-        if event['offset']!=0 and event['length']==24 and int.from_bytes(data[4:8],'big')!=0:
-            meaning='wal-commit-marker'
-    return candidate_descriptor(dict(event,meaning=meaning))
+    op=event['op'];meaning=op;size=0
+    if event['role']=='wal':
+        # Geometry bytes stay in the private trace. Revalidate the header here,
+        # independently of the C semantic label and public page-size integer.
+        header=bytes.fromhex(event['wal_header'])
+        require(len(header) in (0,32),'invalid private WAL header length')
+        size=wal_header_page_size(header)
+        require(not header or size,'invalid private WAL geometry header')
+        if op=='write':
+            data=bytes.fromhex(event['hex'])
+            require(len(data)==event['length'],'target trace write length')
+            meaning,size=wal_write_classification(data,event['offset'],header)
+    return candidate_descriptor(dict(event,meaning=meaning,wal_page_size=size))
 
 
 def candidate_descriptor(event):
@@ -552,32 +591,42 @@ def candidate_descriptor(event):
             event['op'] in ('write','sync','truncate'),'invalid target operation')
     role='wal' if event['name'].endswith('-wal') else ('journal' if event['name'].endswith('-journal') else 'database')
     require(event['role']==role,'target role/name mismatch')
-    meanings=('wal-header-reset','wal-frame','wal-commit-marker') if event['op']=='write' and role=='wal' else (event['op'],)
+    meanings=('wal-header-reset','wal-frame','wal-commit-marker','wal-page-data',
+              'wal-frame-fragment','wal-header-fragment','wal-unknown','wal-raw') if event['op']=='write' and role=='wal' else (event['op'],)
     require(event['meaning'] in meanings,'invalid target semantic')
-    for name in ('offset','length','flags'):
+    for name in ('offset','length','flags','wal_page_size'):
         require(type(event[name]) is int and 0<=event[name]<2**63,'invalid target range')
+    size=event['wal_page_size'];offset=event['offset'];n=event['length'];meaning=event['meaning']
+    require((size==0 or valid_page_size(size)) and (role=='wal' or size==0),'invalid WAL page size context')
     if event['op']=='write':
-        require(event['length']>0,'empty target write')
+        require(n>0,'empty target write')
         if role=='wal':
-            require((event['meaning']=='wal-header-reset') == (event['offset']==0),
-                    'WAL header/append offset mismatch')
-            if event['meaning']=='wal-commit-marker':
-                require(event['length']==24,'invalid WAL commit-marker shape')
+            if meaning=='wal-header-reset':require(offset==0 and n==32 and size>0,'invalid WAL reset geometry')
+            elif meaning=='wal-header-fragment':require(offset<32 and offset+n<=32 and (offset!=0 or n<32),'invalid WAL header fragment')
+            elif meaning=='wal-unknown':require(size==0 and offset>=32,'invalid unknown WAL geometry')
+            elif meaning!='wal-raw':
+                require(size>0 and offset>=32,'missing WAL frame geometry')
+                within=(offset-32)%(size+24)
+                if meaning in ('wal-frame','wal-commit-marker'):
+                    require(within==0 and n==24,'invalid WAL frame-header geometry')
+                elif meaning=='wal-frame-fragment':require(within<24 and n<=24-within and (within!=0 or n!=24),'invalid WAL frame fragment')
+                else:require(within>=24 and n<=size+24-within,'invalid WAL page-data geometry')
     return {k:event[k] for k in TARGET_FIELDS}
 
 
 def target_selector(descriptor):
     """Only positive WAL append offsets are geometry, never every offset.
 
-    Exact length/flags and phase/file/role/op/meaning always remain identity.
-    Header-reset offset zero, truncate size, sync offset/flags and database or
+    Exact length/flags, validated page size and phase/file/role/op/meaning remain identity.
+    Unknown/mixed/partial-header writes stay strict raw targets. Header-reset
+    offset zero, truncate size, sync offset/flags and database or
     journal write offsets stay exact. The latter have no reviewed semantic page
     identity with which to safely replace their physical address.
     """
     descriptor=candidate_descriptor(descriptor)
     selector=dict(descriptor)
     append=(descriptor['role']=='wal' and descriptor['op']=='write' and
-            descriptor['meaning'] in ('wal-frame','wal-commit-marker'))
+            descriptor['meaning'] in ('wal-frame','wal-commit-marker','wal-page-data'))
     selector['offset_policy']='positive-wal-append' if append else 'exact'
     if append:del selector['offset']  # Its positive range was checked above.
     return selector
@@ -602,7 +651,7 @@ def make_target(items, index, samples):
 
 def target_summary(plan):
     return {k:plan[k] for k in ('descriptor','selector','samples','group_position','group_count','baseline_seq')} | {
-        'identity_policy':TARGET_POLICY}
+        'identity_policy':TARGET_POLICY,'wal_classifier':'wal-format-boundaries-v1'}
 
 
 def target_evidence(plan, event):
