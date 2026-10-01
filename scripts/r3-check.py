@@ -520,10 +520,13 @@ def inspect(worker, path):
     return json.loads(run(worker, '-root', path, '-mode', 'inspect'))
 
 # Discovery keeps the approved first/middle/last samples. Sequence numbers only
-# identify trace rows. Full descriptors remain evidence; only the explicitly
-# projected selector and Nth member of that exact selector group identify a target.
+# identify trace rows. The coverage bucket and Nth live member select a sample;
+# full descriptors remain evidence and exact private trace authorizes injection.
 TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags','wal_page_size')
-TARGET_POLICY = 'stable-selector-group-nth-v3'
+TARGET_POLICY = 'bounded-coverage-bucket-nth-v4'
+MAX_PLANNED_FAULT_CASES = 1000
+MAX_PLANNED_RECOVERIES = 5000
+MAX_PLAN_SUMMARY_BUCKETS = 512
 FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
 REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
                        'checkpoint','autocheckpoint','migration','fresh','empty-m1')
@@ -615,13 +618,15 @@ def candidate_descriptor(event):
 
 
 def target_selector(descriptor):
-    """Only positive WAL append offsets are geometry, never every offset.
+    """Retained baseline/live selector evidence, not v4 coverage sampling.
 
-    Exact length/flags, validated page size and phase/file/role/op/meaning remain identity.
-    Unknown/mixed/partial-header writes stay strict raw targets. Header-reset
-    offset zero, truncate size, sync offset/flags and database or
-    journal write offsets stay exact. The latter have no reviewed semantic page
-    identity with which to safely replace their physical address.
+    Only positive WAL append offsets are geometry in this descriptor projection.
+
+    The projection retains exact length/flags, validated page size and semantic
+    fields. Header-reset offset zero, raw/fragment ranges, truncate size,
+    sync offset/flags and database/journal offsets stay exact in this evidence. V4 chooses a LIVE sample
+    by bucket/N, not by equality with this baseline projection; pre/post trace
+    verification still compares the entire live descriptor, including offsets.
     """
     descriptor=candidate_descriptor(descriptor)
     selector=dict(descriptor)
@@ -632,44 +637,64 @@ def target_selector(descriptor):
     return selector
 
 
-def target_group(descriptor):
-    """Canonical selector items are the sole discovery AND live group key.
+def coverage_bucket(descriptor):
+    """Sampling only; never a replacement for exact LIVE private-trace checks.
 
-    Positive WAL append offset is excluded only by target_selector; all other
-    selector fields, including exact length/flags and strict offsets, remain.
+    Database/journal writes coalesce physical offsets, but retain exact lengths.
+    WAL shapes coalesce incidental fragment offsets/lengths, never semantic
+    classes, validated page sizes or flags. Sync/truncate geometry stays exact.
+    No bucket says that its members name the same page, transaction or bytes.
     """
-    return tuple(sorted(target_selector(descriptor).items()))
+    d=candidate_descriptor(descriptor)
+    bucket={k:d[k] for k in ('phase','name','role','op','meaning','flags','wal_page_size')}
+    if d['op']!='write':
+        bucket.update(shape=d['op'],offset=d['offset'],length=d['length'])
+    elif d['role']!='wal':
+        bucket.update(shape='write',length=d['length'])
+    elif d['meaning']=='wal-page-data':
+        full=(d['offset']-32)%(d['wal_page_size']+24)==24 and d['length']==d['wal_page_size']
+        bucket['shape']='wal-page-full' if full else 'wal-page-fragment'
+    else:
+        # Format classifier is unchanged. Header fragments, raw and unknown
+        # stay distinct from complete frame/commit headers (and from each other).
+        bucket['shape']=d['meaning']
+        if d['meaning'] in ('wal-header-reset','wal-frame','wal-commit-marker'):
+            bucket['length']=d['length']
+        if d['meaning']=='wal-header-reset':bucket['offset']=0
+    return bucket
+
+
+def target_group(descriptor):
+    return tuple(sorted(coverage_bucket(descriptor).items()))
 
 
 def make_target(items, index, samples):
     require(items and type(index) is int and 0<=index<len(items),'invalid target position')
     descriptor=event_descriptor(items[index]);group=target_group(descriptor)
-    require(all(target_group(event_descriptor(e))==group for e in items),'mixed target selector group')
-    return {'descriptor':descriptor, 'selector':target_selector(descriptor), 'samples':samples,
+    require(all(target_group(event_descriptor(e))==group for e in items),'mixed target coverage bucket')
+    return {'descriptor':descriptor, 'selector':target_selector(descriptor),
+            'coverage_bucket':coverage_bucket(descriptor), 'samples':samples,
             'group_position':index+1,'group_count':len(items),'baseline_seq':items[index]['seq']}
 
 
 def target_summary(plan):
-    return {k:plan[k] for k in ('descriptor','selector','samples','group_position','group_count','baseline_seq')} | {
+    return {k:plan[k] for k in ('descriptor','selector','coverage_bucket','samples','group_position','group_count','baseline_seq')} | {
         'identity_policy':TARGET_POLICY,'wal_classifier':'wal-format-boundaries-v1'}
 
 
 def target_evidence(plan, event):
     descriptor=event_descriptor(event)
-    require(target_selector(descriptor)==plan['selector'],'fault schedule selector drift')
-    return {'planned':target_summary(plan),'observed':dict(descriptor,seq=event['seq']),
-            'geometry_changed':['offset'] if descriptor['offset']!=plan['descriptor']['offset'] else []}
+    require(coverage_bucket(descriptor)==plan['coverage_bucket'],'fault schedule coverage bucket drift')
+    return {'planned':target_summary(plan),'observed':dict(descriptor,seq=event['seq']), 'observed_selector':target_selector(descriptor),
+            'geometry_changed':[k for k in ('offset','length') if descriptor[k]!=plan['descriptor'][k]]}
 
 
 class TargetMatcher:
-    """Select the Nth live member of ONE complete stable-selector class.
+    """Select the Nth LIVE member of one coverage bucket, then verify exactly.
 
-    Other selector shapes never advance this group or authorize injection.
-    Members within this group are intentionally indistinguishable: adding or
-    removing one changes positions and cannot reveal a hidden page/transaction
-    identity. Missing N fails. Discovery count/first-middle-last labels and full
-    baseline geometry are evidence, not requirements on the live trace suffix.
-    No prefix comparison, search ahead, retry or physical-address substitution.
+    Baseline offsets/fragment lengths describe discovery, not a physical target
+    to search for. Other buckets never advance N. Missing N fails. There is no
+    retry, search ahead, nearest address or requirement on a live trace suffix.
     """
     def __init__(self, plan):
         self.plan=plan;self.group=target_group(plan['descriptor']);self.seen=0
@@ -678,6 +703,7 @@ class TargetMatcher:
         self.alternates={};self.alternate_events=0;self.unlisted_alternate_events=0
         self.trace_verified=False;self.decision_sent=False;self.reached=False;self.ack_before_fault=0
         require(target_selector(plan['descriptor'])==plan['selector'] and
+                coverage_bucket(plan['descriptor'])==plan['coverage_bucket'] and
                 type(plan['group_position']) is int and type(plan['group_count']) is int and
                 1<=plan['group_position']<=plan['group_count'] and
                 type(plan['baseline_seq']) is int and plan['baseline_seq']>0 and
@@ -703,14 +729,14 @@ class TargetMatcher:
                     self.alternates[group]['count']+=1
                     self.alternates[group]['last_observed']=observed
                 elif len(self.alternates)<8:
-                    self.alternates[group]={'selector':target_selector(descriptor),'count':1,
+                    self.alternates[group]={'coverage_bucket':coverage_bucket(descriptor),'count':1,
                                             'last_observed':observed}
                 else:self.unlisted_alternate_events+=1
             return False
         self.seen+=1
         if self.seen!=self.plan['group_position']:return False
         baseline=dict(self.plan['descriptor'],seq=self.plan['baseline_seq'])
-        if descriptor['offset']!=baseline['offset']:
+        if any(descriptor[k]!=baseline[k] for k in ('offset','length')):
             self.geometry_change={'group_position':self.seen,'baseline':baseline,'observed':observed}
         self.selected_seq=event['seq']
         self.selected_descriptor=descriptor
@@ -724,7 +750,7 @@ class TargetMatcher:
     def diagnostics(self):
         return {'planned':target_summary(self.plan),'matching_live_group_members':self.seen,
                 'relevant_alternate_scope':'same-phase-or-file','relevant_alternate_events':self.alternate_events,
-                'alternate_selectors':list(self.alternates.values()),
+                'alternate_buckets':list(self.alternates.values()),
                 'unlisted_alternate_events':self.unlisted_alternate_events,
                 'last_observed':self.last_observed,'selected_seq':self.selected_seq,
                 'selected_observed':dict(self.selected_descriptor,seq=self.selected_seq) if self.selected_descriptor else None,
@@ -747,13 +773,13 @@ def verify_pending_trace(trace, event):
 
 
 def decide_io(stream, trace, matcher, event, acknowledgements):
-    inject=matcher.observe(event)  # Only this exact selector group and Nth position may inject.
+    inject=matcher.observe(event)  # Only this coverage bucket and Nth position may proceed to exact verification.
     if matcher.geometry_change is not None:
         # Safe metadata for the selected member, before any reply. This
-        # is a selector match, not proof of private-trace verification/injection.
+        # is a bucket match, not proof of private-trace verification/injection.
         log(kind='target-geometry',identity_policy=TARGET_POLICY,
             target_baseline_seq=matcher.plan['baseline_seq'],
-            stage='selector-match-before-trace-verification',**matcher.geometry_change)
+            stage='bucket-match-before-trace-verification',**matcher.geometry_change)
     if inject:
         verify_pending_trace(trace,event)
         matcher.trace_verified=True
@@ -779,6 +805,16 @@ def record_acknowledgement(ledger, acknowledgements, case, request, message):
 def fault_modes(target):
     op=target['descriptor']['op']
     return ['cut-before','cut-after','ioerr']+(['full'] if op in ('write','truncate') else [])+(['partial'] if op=='write' else [])
+
+
+def required_acknowledgements():
+    required_ack=set()
+    for sector in (512,4096):
+        for op in ('checkpoint','autocheckpoint'):
+            required_ack.update((op,sector,'database',meaning) for meaning in ('write','sync'))
+        required_ack.add(('checkpoint',sector,'wal','truncate'))
+        required_ack.add(('autocheckpoint',sector,'wal','wal-header-reset'))
+    return required_ack
 
 
 class AcceptanceCoverage:
@@ -808,13 +844,7 @@ class AcceptanceCoverage:
         require(set(self.planned)==families,'required operation/sector family absent')
         expected={(*key,*item) for key,items in self.planned.items() for item in items}
         require(self.completed==expected,'required target/fault cases incomplete')
-        required_ack=set()
-        for sector in (512,4096):
-            for op in ('checkpoint','autocheckpoint'):
-                required_ack.update((op,sector,'database',meaning) for meaning in ('write','sync'))
-            required_ack.add(('checkpoint',sector,'wal','truncate'))
-            required_ack.add(('autocheckpoint',sector,'wal','wal-header-reset'))
-        require(required_ack<=self.post_ack,'new acknowledged-effect recovery coverage missing')
+        require(required_acknowledgements()<=self.post_ack,'new acknowledged-effect recovery coverage missing')
 
 
 def execute(worker, root, case, request, initial, target=None, fault='none', sector=4096, probe=False, native=False, diagnostic=False):
@@ -1314,6 +1344,94 @@ def matrix_requests(requests):
     return [by_operation[operation] for operation in MATRIX_ORDER]
 
 
+def compile_application_plans(requests, discover):
+    """No application faults here: all 12 families x two sectors first."""
+    plans=[]
+    for request in matrix_requests(requests):
+        for sector in (512,4096):
+            discovered=discover(request,sector)
+            plans.append(dict(discovered,request=request,operation=request['Operation'],sector=sector))
+    return plans
+
+
+def preflight_application_plans(plans):
+    """Emit one bounded census, then reject oversized plans WITHOUT truncation.
+
+    At most 512 bucket rows are logged (largest contributors first on overflow).
+    An accepted <=1000-case plan has <=333 buckets, since every target has at
+    least three fault modes. Thus no accepted plan loses any bucket detail.
+    Oversized reports disclose omitted rows and hash the complete bucket census.
+    """
+    require([(p['operation'],p['sector']) for p in plans]==
+            [(op,sector) for op in MATRIX_ORDER for sector in (512,4096)],
+            'full plan families/sectors missing duplicated or out of order')
+    families=[];buckets=[];total_cases=0;total_targets=0
+    for batch in plans:
+        targets=batch['targets'];require(targets,'empty family plan')
+        seen=set();groups={};cases=0
+        for key,target in targets:
+            TargetMatcher(target)  # Validate descriptor/bucket/selector linkage.
+            require(key==target_group(target['descriptor']),'plan coverage bucket key mismatch')
+            require(target['baseline_seq'] not in seen,'duplicate plan target')
+            seen.add(target['baseline_seq']);groups.setdefault(key,[]).append(target)
+            modes=fault_modes(target)
+            require(len(modes)==len(set(modes)) and set(modes)<=set(FAULT_MODES),'invalid planned fault modes')
+            cases+=len(modes)
+        bucket_cases=0
+        for key,items in groups.items():
+            count=items[0]['group_count'];positions=sorted({1,count//2+1,count})
+            require(all(p['group_count']==count for p in items) and
+                    sorted(p['group_position'] for p in items)==positions,
+                    'plan first middle last coverage incomplete')
+            for p in items:
+                require(p['samples']==[label for label,pos in
+                    (('first',1),('middle',count//2+1),('last',count)) if pos==p['group_position']],
+                    'plan sample labels incorrect')
+            n=sum(len(fault_modes(p)) for p in items);bucket_cases+=n
+            buckets.append({'operation':batch['operation'],'sector':batch['sector'],
+                'coverage_bucket':dict(key),'observed_members':count,'targets':len(items),
+                'positions':positions,'fault_cases':n,'recoveries':n*len(RECOVERY_SCHEDULES)})
+        require(bucket_cases==cases,'plan bucket case arithmetic mismatch')
+        families.append({'operation':batch['operation'],'sector':batch['sector'],
+            'buckets':len(groups),'targets':len(targets),'fault_cases':cases,
+            'recoveries':cases*len(RECOVERY_SCHEDULES)})
+        total_cases+=cases;total_targets+=len(targets)
+    recoveries=total_cases*len(RECOVERY_SCHEDULES)
+    require(total_cases==sum(f['fault_cases'] for f in families)==sum(b['fault_cases'] for b in buckets)
+            and recoveries==sum(f['recoveries'] for f in families)==sum(b['recoveries'] for b in buckets),
+            'plan total arithmetic mismatch')
+    ordered=sorted(buckets,key=lambda b:(-b['fault_cases'],b['operation'],b['sector'],encoded(b['coverage_bucket'])))
+    summary={'kind':'application-plan','policy':TARGET_POLICY,'preflight':'PENDING',
+        'families':families,'bucket_count':len(buckets),'targets':total_targets,
+        'fault_cases':total_cases,'recoveries':recoveries,
+        'max_fault_cases':MAX_PLANNED_FAULT_CASES,'max_recoveries':MAX_PLANNED_RECOVERIES,
+        'buckets':ordered[:MAX_PLAN_SUMMARY_BUCKETS],
+        'omitted_bucket_rows':max(0,len(buckets)-MAX_PLAN_SUMMARY_BUCKETS),
+        'all_buckets_sha256':digest(encoded(buckets)),
+        'required_acknowledgements':[list(k) for k in sorted(required_acknowledgements())],
+        'recovery_schedules':[list(k) for k in RECOVERY_SCHEDULES]}
+    log(**summary)
+    require(total_cases<=MAX_PLANNED_FAULT_CASES,'application plan fault-case budget exceeded; no application injection')
+    require(recoveries<=MAX_PLANNED_RECOVERIES,'application plan recovery budget exceeded; no application injection')
+    require(not summary['omitted_bucket_rows'],'accepted plan summary incomplete')
+    log(kind='application-plan-gate',result='PASS',fault_cases=total_cases,recoveries=recoveries)
+    return summary
+
+
+def application_cases(requests, discover, acceptance):
+    # A generator deliberately yields NOTHING until every baseline and the full
+    # preflight succeed. Prerequisite probe/negative controls are a separate gate.
+    plans=compile_application_plans(requests,discover)
+    preflight_application_plans(plans)
+    for batch in plans:acceptance.plan(batch['operation'],batch['sector'],batch['targets'])
+    for batch in plans:
+        log(kind='schedule',operation=batch['operation'],sector=batch['sector'],
+            selection='first-middle-last per coverage bucket; Nth live member; exact live private trace; no substitution',
+            targets=[target_summary(p) for _,p in batch['targets']])
+        for _,target in batch['targets']:
+            for fault in fault_modes(target):yield batch,target,fault
+
+
 def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
     # Inspect one fresh positive image first. Only copies of its observed oracle
     # input are corrupted; a failed inspector cannot masquerade as rejection.
@@ -1417,48 +1535,46 @@ def main():
     image=baseline['model'].crash('retain',17);p=materialize(root,'validation-recovery',image);after=inspect(worker,p)
     oracle(before,after,requests[0],baseline['ack'],schema);replay(worker,root,p,before,requests[0],baseline['ack'],schema);remove_owned(root,p)
     negative_oracles(worker,root,before,after,requests[0],baseline['ack'],image,schema)
-    log(kind='gate',harness_validation='PASS',acceptance_matrix='STARTING')
+    log(kind='gate',harness_validation='PASS',acceptance_matrix='AWAITING_FIXTURES_AND_FULL_PLAN')
     old=owned(root,'m1');legacy=m1_fixture(m1,old);oldstate=inspect(worker,old);oldimage=image_files(old)
     emptyold=owned(root,'empty-m1');m1_fixture(m1,emptyold,empty=True);emptystate=inspect(worker,emptyold);emptyimage=image_files(emptyold)
     requests += [{'Operation':'migration','Body':'{}','Legacy':legacy},{'Operation':'fresh','Body':'{}'},{'Operation':'empty-m1','Body':'{}'}]
-    cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256();acceptance=AcceptanceCoverage()
-    for request in matrix_requests(requests):
+    def discover(request,sector):
         op=request['Operation'];seedstate=oldstate if op=='migration' else before;seedimage=oldimage if op=='migration' else initial
         if op=='empty-m1':seedstate,seedimage=emptystate,emptyimage
         if op=='fresh':
             seedimage={'store.db':b''};empty=materialize(root,'empty',seedimage);seedstate=inspect(worker,empty);remove_owned(root,empty)
-        for sector in (512,4096):
-            base=execute(worker,root,op+'-baseline',request,seedimage,sector=sector)
-            require(all(m['ok'] for m in base['messages'] if m['kind']=='response'),'no-fault baseline failed')
-            settings=next(m['value'] for m in base['messages'] if m['kind']=='settings')
-            check_settings(settings)
-            check_mmap_coverage(base['messages'],settings)
-            log(kind='settings',operation=op,sector=sector,value={q:setting_value(q,v) for q,v in settings.items() if q in SETTINGS})
-            p=materialize(root,'baseline',base['model'].crash('retain',17));oracle(seedstate,inspect(worker,p),request,base['ack'],schema);remove_owned(root,p)
-            targets=select_targets(base['events'],op)
-            acceptance.plan(op,sector,targets)
-            log(kind='schedule',operation=op,sector=sector,
-                selection='discovery first-middle-last per stable selector group; Nth live member before injection; exact live private trace; no substitution',
-                targets=[target_summary(p) for _,p in targets])
-            for key,target in targets:
-                for fault in fault_modes(target):
-                    case=f'{op}-s{sector}-b{target["baseline_seq"]}-{fault}'
-                    got=execute(worker,root,case,request,seedimage,target,fault,sector)
-                    reached=got['all'][got['target_seq']]
-                    evidence=target_evidence(target,reached)
-                    schedules=RECOVERY_SCHEDULES
-                    results=[]
-                    for schedule,seed in schedules:
-                        image=got['model'].crash(schedule,seed)
-                        p=materialize(root,'recovery',image)
-                        # FIRST SQLite connection after reconstruction: separate process, no migration.
-                        state=inspect(worker,p);outcome=oracle(seedstate,state,request,got['ack'],schema)
-                        replay(worker,root,p,seedstate,request,got['ack'],schema)
-                        item={'schedule':schedule,'seed':seed,'outcome':outcome,'image_sha256':digest(encoded({n:digest(b) for n,b in image.items()})),'state_sha256':digest(encoded(state))}
-                        results.append(item);recoveries+=1;remove_owned(root,p)
-                    report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],**evidence,'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
-                    acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
-                    log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],target['descriptor']['meaning'],fault))
+        base=execute(worker,root,op+'-baseline',request,seedimage,sector=sector)
+        require(all(m['ok'] for m in base['messages'] if m['kind']=='response'),'no-fault baseline failed')
+        settings=next(m['value'] for m in base['messages'] if m['kind']=='settings')
+        check_settings(settings)
+        check_mmap_coverage(base['messages'],settings)
+        log(kind='settings',operation=op,sector=sector,value={q:setting_value(q,v) for q,v in settings.items() if q in SETTINGS})
+        p=materialize(root,'baseline',base['model'].crash('retain',17));oracle(seedstate,inspect(worker,p),request,base['ack'],schema);remove_owned(root,p)
+        targets=select_targets(base['events'],op)
+        return dict(seedstate=seedstate,seedimage=seedimage,targets=targets)
+
+    cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256();acceptance=AcceptanceCoverage()
+    for batch,target,fault in application_cases(requests,discover,acceptance):
+        request=batch['request'];op=batch['operation'];sector=batch['sector']
+        seedstate=batch['seedstate'];seedimage=batch['seedimage']
+        case=f'{op}-s{sector}-b{target["baseline_seq"]}-{fault}'
+        got=execute(worker,root,case,request,seedimage,target,fault,sector)
+        reached=got['all'][got['target_seq']]
+        evidence=target_evidence(target,reached)
+        schedules=RECOVERY_SCHEDULES
+        results=[]
+        for schedule,seed in schedules:
+            image=got['model'].crash(schedule,seed)
+            p=materialize(root,'recovery',image)
+            # FIRST SQLite connection after reconstruction: separate process, no migration.
+            state=inspect(worker,p);outcome=oracle(seedstate,state,request,got['ack'],schema)
+            replay(worker,root,p,seedstate,request,got['ack'],schema)
+            item={'schedule':schedule,'seed':seed,'outcome':outcome,'image_sha256':digest(encoded({n:digest(b) for n,b in image.items()})),'state_sha256':digest(encoded(state))}
+            results.append(item);recoveries+=1;remove_owned(root,p)
+        report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],**evidence,'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
+        acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
+        log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],target['descriptor']['meaning'],fault))
     acceptance.require_complete()
     log(kind='FINAL',harness_validation='PASS',T18='PASS',T30='PASS',R3='PASS within write-back-v1 model',cases=cases,recoveries=recoveries,coverage=sorted(coverage),manifest_sha256=manifest.hexdigest(),artifact_upload=False,paid_usage_authorized=0)
     # Only the marked, test-created root is removed, after results/hashes were logged.

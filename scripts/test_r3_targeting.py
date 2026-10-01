@@ -3,6 +3,7 @@
 No SQLite, worker, fixture binary, HTTP or subprocess is executed by these tests.
 Ordinary CI does not run this file. Separate execution approval is required.
 """
+import ast
 import importlib.util
 import io
 import json
@@ -79,8 +80,8 @@ class TargetingTests(unittest.TestCase):
     def test_wrong_semantic_operation_never_receives_fault(self):
         self.assert_unrelated(self.event(47,commit=False))
 
-    def test_changed_range_follows_explicit_file_policy(self):
-        for name,allowed in [('store.db-wal',True),('store.db',False),('store.db-journal',False)]:
+    def test_changed_range_is_live_sample_geometry_for_wal_database_and_journal(self):
+        for name,allowed in [('store.db-wal',True),('store.db',True),('store.db-journal',True)]:
             with self.subTest(name=name):
                 self.sink=io.BytesIO();original=self.event(name=name)
                 matcher=self.c.TargetMatcher(self.plan([original]))
@@ -139,7 +140,7 @@ class TargetingTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
             matcher.require_reached(None)
 
-    def test_different_append_length_is_a_different_group(self):
+    def test_full_page_and_fragment_are_different_sampling_buckets(self):
         plan=self.plan([self.event(length=4096,commit=False)])
         matcher=self.c.TargetMatcher(plan)
         self.deliver(matcher,self.event(offset=94816,length=2048,commit=False))
@@ -206,7 +207,7 @@ class TargetingTests(unittest.TestCase):
     def test_mixed_selector_group_plan_is_rejected(self):
         header=self.event(10,offset=4152,commit=False)
         page=self.event(47,length=4096,commit=False)
-        with self.assertRaisesRegex(AssertionError,'mixed target selector group'):
+        with self.assertRaisesRegex(AssertionError,'mixed target coverage bucket'):
             self.plan([header,page],1)
         self.assertEqual(self.sink.getvalue(),b'')
 
@@ -352,7 +353,7 @@ class TargetingTests(unittest.TestCase):
             self.deliver(matcher,e)
         self.assertEqual(self.sink.getvalue(),b'c 31\nc 32\nc 33\ni 34\n')
         self.assertEqual(matcher.seen,2)
-        self.assertEqual(matcher.diagnostics()['alternate_selectors'][0]['count'],2)
+        self.assertEqual(matcher.diagnostics()['alternate_buckets'][0]['count'],2)
 
     def test_extra_page_data_does_not_disturb_commit_marker_group(self):
         matcher=self.c.TargetMatcher(self.plan([self.event(10),self.event(20)],1))
@@ -362,7 +363,7 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(self.sink.getvalue(),b'c 31\nc 32\nc 33\ni 34\n')
         self.assertEqual(matcher.seen,2)
 
-    def test_group_key_is_exactly_the_selector_policy(self):
+    def test_group_key_is_exactly_the_coverage_bucket_policy(self):
         items=[self.event(),self.event(offset=98912),self.event(length=4096),
                self.event(flags=1),self.event(offset=0,length=32),
                self.event(name='store.db'),self.event(name='store.db-journal'),
@@ -370,11 +371,11 @@ class TargetingTests(unittest.TestCase):
                self.event(op='sync',offset=0,length=0,flags=2)]
         for e in items:
             d=self.c.event_descriptor(e)
-            self.assertEqual(dict(self.c.target_group(d)),self.c.target_selector(d))
+            self.assertEqual(dict(self.c.target_group(d)),self.c.coverage_bucket(d))
         self.assertEqual(self.c.target_group(self.message(items[0])),self.c.target_group(self.message(items[1])))
 
-    def test_discovery_partitions_every_strict_shape_and_preserves_sample_labels(self):
-        # Five members per selector gives three distinct first/middle/last samples.
+    def test_discovery_coalesces_write_offsets_and_preserves_sample_labels(self):
+        # Two physical offsets for database/journal writes coalesce into ten members.
         shapes=[dict(length=24,commit=False),dict(length=4096),dict(length=4096,flags=1),
                 dict(name='store.db',offset=0,length=4096),dict(name='store.db',offset=4096,length=4096),
                 dict(name='store.db-journal',offset=0),dict(name='store.db-journal',offset=24),
@@ -386,11 +387,12 @@ class TargetingTests(unittest.TestCase):
         for key,plan in self.c.select_targets(events,'noop'):
             self.assertEqual(key,self.c.target_group(plan['descriptor']))
             groups.setdefault(key,[]).append(plan)
-        self.assertEqual(len(groups),len(shapes))
+        self.assertEqual(len(groups),len(shapes)-2)
         for plans in groups.values():
-            self.assertEqual([p['group_position'] for p in plans],[1,3,5])
+            count=10 if plans[0]['descriptor']['role'] in ('database','journal') and plans[0]['descriptor']['op']=='write' else 5
+            self.assertEqual([p['group_position'] for p in plans],[1,count//2+1,count])
             self.assertEqual([p['samples'] for p in plans],[['first'],['middle'],['last']])
-            self.assertTrue(all(p['group_count']==5 for p in plans))
+            self.assertTrue(all(p['group_count']==count for p in plans))
 
     def test_sync_offset_length_and_flags_each_remain_exact(self):
         baseline=self.event(op='sync',offset=0,length=0,flags=2)
@@ -427,7 +429,7 @@ class TargetingTests(unittest.TestCase):
         self.deliver(matcher,self.event(31,length=4096))
         for seq in (32,33):self.deliver(matcher,self.event(seq,commit=False))
         for seq in range(34,46):
-            event=self.event(seq,length=100+seq,commit=False)
+            event=self.event(seq,length=100+seq,flags=seq,commit=False)
             msg=self.message(event);msg['secret']='PRIVATE_SENTINEL_DO_NOT_LOG'
             self.c.decide_io(self.sink,self.trace,matcher,msg,[])
         with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
@@ -441,9 +443,9 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(d['planned']['descriptor'],self.c.event_descriptor(self.event(20,length=4096)))
         self.assertEqual(d['matching_live_group_members'],1)
         self.assertEqual(d['relevant_alternate_events'],14)
-        self.assertEqual(len(d['alternate_selectors']),8)
-        self.assertEqual(d['alternate_selectors'][0]['selector']['length'],24)
-        self.assertEqual(d['alternate_selectors'][0]['count'],2)
+        self.assertEqual(len(d['alternate_buckets']),8)
+        self.assertEqual(d['alternate_buckets'][0]['coverage_bucket']['length'],24)
+        self.assertEqual(d['alternate_buckets'][0]['count'],2)
         self.assertEqual(d['unlisted_alternate_events'],5)
         self.assertEqual(len(d['last_observed']),8)
         self.assertEqual(d['last_observed'][-1]['seq'],45)
@@ -562,6 +564,265 @@ class TargetingTests(unittest.TestCase):
 
     def test_complete_synthetic_gate_inputs_are_accepted(self):
         self.coverage_fixture(True).require_complete()
+
+    def test_1477_database_offsets_form_one_bucket_and_three_samples(self):
+        writes=[self.event(i+10,name='store.db',phase='checkpoint',offset=i*4096,length=4096) for i in range(1477)]
+        events=[self.event(1),self.event(2,op='sync',offset=0,length=0)]+writes
+        targets=self.c.select_targets(events,'noop')
+        sampled=[p for _,p in targets if p['descriptor']['role']=='database']
+        self.assertEqual(len({self.c.target_group(self.message(e)) for e in writes}),1)
+        self.assertEqual([p['group_position'] for p in sampled],[1,739,1477])
+        self.assertEqual([p['samples'] for p in sampled],[['first'],['middle'],['last']])
+        self.assertEqual([p['descriptor']['offset'] for p in sampled],[0,738*4096,1476*4096])
+        self.assertTrue(all(p['group_count']==1477 for p in sampled))
+        self.assertTrue(all('offset' not in p['coverage_bucket'] for p in sampled))
+
+    def test_database_live_offset_is_evidence_not_baseline_address_search(self):
+        base=self.event(8,name='store.db',phase='checkpoint',offset=4096,length=4096)
+        live=dict(base,seq=91,offset=32768);plan=self.plan([base])
+        matcher=self.c.TargetMatcher(plan);self.deliver(matcher,live)
+        evidence=self.c.target_evidence(plan,live)
+        self.assertEqual(self.sink.getvalue(),b'i 91\n')
+        self.assertEqual(evidence['planned']['selector']['offset'],4096)
+        self.assertEqual(evidence['observed_selector']['offset'],32768)
+        self.assertEqual(evidence['observed']['offset'],32768)
+        self.assertEqual(evidence['geometry_changed'],['offset'])
+
+    def test_database_private_trace_must_match_exact_live_offset(self):
+        base=self.event(8,name='store.db',phase='checkpoint',offset=4096,length=4096)
+        live=dict(base,seq=91,offset=32768);matcher=self.c.TargetMatcher(self.plan([base]))
+        self.trace.write_text(json.dumps(dict(base,seq=91))+'\n')
+        with self.assertRaisesRegex(AssertionError,'pending trace descriptor mismatch'):
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(live),[])
+        self.assertFalse(matcher.trace_verified);self.assertFalse(matcher.decision_sent)
+        self.assertEqual(self.sink.getvalue(),b'')
+
+    def test_database_lengths_and_flags_stay_separate_buckets(self):
+        base=self.event(name='store.db',offset=0,length=4096)
+        keys=[self.c.target_group(self.message(e)) for e in
+              (base,dict(base,offset=8192),self.event(name='store.db',offset=0,length=2048),dict(base,flags=1))]
+        self.assertEqual(keys[0],keys[1]);self.assertEqual(len(set(keys)),3)
+
+    def test_journal_offsets_coalesce_but_exact_live_trace_is_required(self):
+        base=self.event(name='store.db-journal',offset=0,length=24)
+        live=dict(base,seq=90,offset=512);plan=self.plan([base])
+        self.assertEqual(self.c.coverage_bucket(self.message(base)),self.c.coverage_bucket(self.message(live)))
+        matcher=self.c.TargetMatcher(plan);self.trace.write_text(json.dumps(dict(base,seq=90))+'\n')
+        with self.assertRaisesRegex(AssertionError,'pending trace descriptor mismatch'):
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(live),[])
+        self.assertEqual(self.sink.getvalue(),b'')
+
+    def test_wal_full_page_fragment_frame_commit_and_reset_are_distinct(self):
+        events=[self.event(offset=0,length=32),self.event(commit=False),self.event(),
+                self.event(length=4096),self.event(length=2048),
+                self.event(offset=frame_offset(),length=12),self.event(offset=0,length=16),
+                self.event(offset=frame_offset(),length=4097)]
+        buckets=[self.c.coverage_bucket(self.message(e)) for e in events]
+        self.assertEqual([b['shape'] for b in buckets],['wal-header-reset','wal-frame','wal-commit-marker',
+            'wal-page-full','wal-page-fragment','wal-frame-fragment','wal-header-fragment','wal-raw'])
+        self.assertEqual(len({tuple(sorted(b.items())) for b in buckets}),8)
+        unknown=dict(self.event(),wal_header='')
+        self.assertEqual(self.c.coverage_bucket(self.message(unknown))['shape'],'wal-unknown')
+
+    def test_many_page_fragment_lengths_form_one_bucket(self):
+        fragments=[self.event(i+10,offset=page_offset(i),length=i+1) for i in range(1000)]
+        targets=self.c.select_targets([self.event(1),self.event(2,op='sync',offset=0,length=0)]+fragments,'noop')
+        plans=[p for _,p in targets if p['coverage_bucket']['shape']=='wal-page-fragment']
+        self.assertEqual(len(plans),3)
+        self.assertEqual([p['group_position'] for p in plans],[1,501,1000])
+        self.assertEqual([p['descriptor']['length'] for p in plans],[1,501,1000])
+        self.assertTrue(all('length' not in p['coverage_bucket'] for p in plans))
+
+    def test_many_frame_fragment_lengths_form_one_bucket(self):
+        events=[self.event(i,offset=frame_offset(i),length=i) for i in range(1,24)]
+        plan=self.plan(events,11)
+        self.assertEqual(plan['group_position'],12);self.assertEqual(plan['group_count'],23)
+        self.assertEqual(len({self.c.target_group(self.message(e)) for e in events}),1)
+
+    def test_fragment_live_length_and_offset_are_recorded_after_exact_verification(self):
+        base=self.event(1,offset=page_offset(),length=512)
+        live=self.event(9,offset=page_offset(3)+100,length=73)
+        plan=self.plan([base]);matcher=self.c.TargetMatcher(plan);self.deliver(matcher,live)
+        evidence=self.c.target_evidence(plan,live)
+        self.assertEqual(self.sink.getvalue(),b'i 9\n')
+        self.assertEqual(evidence['geometry_changed'],['offset','length'])
+        self.assertEqual(evidence['observed']['length'],73)
+        self.assertEqual(evidence['planned']['descriptor']['length'],512)
+
+    def test_fragment_private_length_mismatch_cannot_inject(self):
+        base=self.event(length=512);live=self.event(90,length=73)
+        matcher=self.c.TargetMatcher(self.plan([base]));self.trace.write_text(json.dumps(self.event(90,length=74))+'\n')
+        with self.assertRaisesRegex(AssertionError,'pending trace descriptor mismatch'):
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(live),[])
+        self.assertEqual(self.sink.getvalue(),b'');self.assertFalse(matcher.decision_sent)
+
+    def test_fragment_page_size_and_flags_remain_distinct(self):
+        events=[self.event(length=80),self.event(length=90),self.event(length=80,flags=1),
+                self.event(length=80,page_size=1024)]
+        keys=[self.c.target_group(self.message(e)) for e in events]
+        self.assertEqual(keys[0],keys[1]);self.assertEqual(len(set(keys)),3)
+
+    def test_raw_unknown_fragments_and_page_data_cannot_satisfy_commit_target(self):
+        matcher=self.c.TargetMatcher(self.plan())
+        events=[self.event(1,length=4096),self.event(2,length=12,offset=frame_offset()),
+                self.event(3,length=4097,offset=frame_offset()),dict(self.event(4),wal_header='')]
+        for event in events:self.deliver(matcher,event)
+        self.assertEqual(matcher.seen,0);self.assertNotIn(b'i ',self.sink.getvalue())
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):matcher.require_reached(None)
+        with self.assertRaisesRegex(AssertionError,'commit marker not identified'):
+            self.c.select_targets(events+[self.event(5,op='sync',offset=0,length=0)],'noop')
+
+    def test_nth_database_member_ignores_other_buckets_and_missing_n_fails(self):
+        a=self.event(1,name='store.db',length=4096,offset=0)
+        plan=self.plan([a,dict(a,seq=2,offset=4096),dict(a,seq=3,offset=8192)],2)
+        matcher=self.c.TargetMatcher(plan)
+        for event in (dict(a,seq=10,offset=12288),self.event(11),dict(a,seq=12,offset=16384)):
+            self.deliver(matcher,event)
+        self.assertEqual(matcher.seen,2);self.assertNotIn(b'i ',self.sink.getvalue())
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):matcher.require_reached(None)
+        self.deliver(matcher,dict(a,seq=13,offset=20480))
+        self.assertEqual(self.sink.getvalue(),b'c 10\nc 11\nc 12\ni 13\n')
+
+    def test_plan_bucket_tampering_cannot_authorize_injection(self):
+        plan=self.plan();plan['coverage_bucket']['shape']='wal-page-fragment'
+        with self.assertRaisesRegex(AssertionError,'invalid target group plan'):self.c.TargetMatcher(plan)
+        self.assertEqual(self.sink.getvalue(),b'')
+
+    def planning_fixture(self, db_count=0, distinct_flags=False, history=None):
+        requests=[{'Operation':op} for op in self.c.REQUIRED_OPERATIONS]
+        events=[self.event(1),self.event(2,op='sync',offset=0,length=0)]
+        events += [self.event(i+3,name='store.db',offset=4096*i,length=4096,
+                              flags=i if distinct_flags else 0) for i in range(db_count)]
+        def discover(request,sector):
+            if history is not None:history.append((request['Operation'],sector))
+            # Fake discovery data only: no worker, SQLite or real plan is run.
+            return dict(targets=self.c.select_targets(events,'noop'),seedimage={},seedstate={})
+        return requests,discover
+
+    def test_full_plan_all_24_discoveries_precede_first_application_case(self):
+        history=[];requests,discover=self.planning_fixture(history=history);coverage=self.c.AcceptanceCoverage()
+        iterator=self.c.application_cases(requests,discover,coverage);self.assertEqual(history,[])
+        first=next(iterator)
+        self.assertEqual(history,[(op,s) for op in self.c.MATRIX_ORDER for s in (512,4096)])
+        self.assertEqual(len(coverage.planned),24)
+        self.assertEqual(first[0]['operation'],'checkpoint');self.assertEqual(first[0]['sector'],512)
+        kinds=[call.kwargs['kind'] for call in self.log.call_args_list]
+        self.assertEqual(kinds,['application-plan','application-plan-gate','schedule'])
+
+    def test_late_discovery_failure_yields_no_application_fault_case(self):
+        history=[];requests,discover=self.planning_fixture(history=history);injections=[]
+        def failing(request,sector):
+            if request['Operation']=='unarchive' and sector==4096:raise TimeoutError('synthetic')
+            return discover(request,sector)
+        coverage=self.c.AcceptanceCoverage()
+        with self.assertRaises(TimeoutError):
+            for item in self.c.application_cases(requests,failing,coverage):injections.append(item)
+        self.assertEqual(len(history),23);self.assertEqual(injections,[]);self.assertEqual(coverage.planned,{})
+        self.log.assert_not_called()
+
+    def test_oversized_full_plan_fails_before_any_application_fault(self):
+        history=[];requests,discover=self.planning_fixture(8,True,history);injections=[]
+        coverage=self.c.AcceptanceCoverage()
+        with self.assertRaisesRegex(AssertionError,'fault-case budget exceeded'):
+            for item in self.c.application_cases(requests,discover,coverage):injections.append(item)
+        self.assertEqual(len(history),24);self.assertEqual(injections,[]);self.assertEqual(coverage.planned,{})
+        self.assertEqual(len(self.log.call_args_list),1)
+        summary=self.log.call_args.kwargs
+        self.assertEqual(summary['preflight'],'PENDING')
+        self.assertEqual(summary['fault_cases'],1152);self.assertEqual(summary['recoveries'],5760)
+        self.assertEqual(len(summary['buckets']),240);self.assertEqual(summary['omitted_bucket_rows'],0)
+
+    def test_recovery_limit_is_independently_enforced_before_faults(self):
+        requests,discover=self.planning_fixture(8,True);injections=[]
+        with mock.patch.object(self.c,'MAX_PLANNED_FAULT_CASES',2000):
+            with self.assertRaisesRegex(AssertionError,'recovery budget exceeded'):
+                for item in self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()):injections.append(item)
+        self.assertEqual(injections,[])
+        self.assertFalse(any(c.kwargs['kind']=='application-plan-gate' for c in self.log.call_args_list))
+
+    def test_plan_arithmetic_and_every_compatible_mode_are_preserved(self):
+        requests,discover=self.planning_fixture();cases=list(self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()))
+        summary=next(c.kwargs for c in self.log.call_args_list if c.kwargs['kind']=='application-plan')
+        self.assertEqual(len(cases),192);self.assertEqual(summary['targets'],48)
+        self.assertEqual(summary['fault_cases'],192);self.assertEqual(summary['recoveries'],960)
+        self.assertEqual(sum(b['fault_cases'] for b in summary['buckets']),192)
+        self.assertEqual(sum(f['recoveries'] for f in summary['families']),960)
+        self.assertEqual({mode for _,_,mode in cases},set(self.c.FAULT_MODES))
+        self.assertEqual(summary['max_fault_cases'],1000);self.assertEqual(summary['max_recoveries'],5000)
+        self.assertEqual(summary['recovery_schedules'],[['discard',17],['retain',17],['reorder-torn',17],['reorder-torn',29],['reorder-torn',101]])
+
+    def test_plan_inclusive_limits_accept_equal_counts(self):
+        requests,discover=self.planning_fixture()
+        with mock.patch.object(self.c,'MAX_PLANNED_FAULT_CASES',192),mock.patch.object(self.c,'MAX_PLANNED_RECOVERIES',960):
+            cases=list(self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()))
+        self.assertEqual(len(cases),192)
+
+    def test_full_plan_missing_sector_or_family_never_passes_preflight(self):
+        requests,discover=self.planning_fixture();plans=self.c.compile_application_plans(requests,discover)
+        for index in range(24):
+            with self.subTest(index=index):
+                with self.assertRaisesRegex(AssertionError,'full plan families/sectors'):
+                    self.c.preflight_application_plans(plans[:index]+plans[index+1:])
+        self.log.assert_not_called()
+
+    def test_preflight_rejects_duplicate_target_or_missing_sample(self):
+        for duplicate in (True,False):
+            with self.subTest(duplicate=duplicate):
+                requests,discover=self.planning_fixture(5);plans=self.c.compile_application_plans(requests,discover)
+                targets=plans[0]['targets']
+                if duplicate:targets.append(targets[-1])
+                else:targets.pop()
+                with self.assertRaisesRegex(AssertionError,'duplicate plan target|first middle last coverage incomplete'):
+                    self.c.preflight_application_plans(plans)
+
+    def test_oversized_summary_is_bounded_and_reports_omitted_buckets(self):
+        requests,discover=self.planning_fixture(25,True);plans=self.c.compile_application_plans(requests,discover)
+        with self.assertRaisesRegex(AssertionError,'fault-case budget exceeded'):self.c.preflight_application_plans(plans)
+        summary=self.log.call_args.kwargs
+        self.assertEqual(summary['bucket_count'],648);self.assertEqual(len(summary['buckets']),512)
+        self.assertEqual(summary['omitted_bucket_rows'],136);self.assertEqual(len(summary['all_buckets_sha256']),64)
+        wire=json.dumps(summary);self.assertNotIn('hex',wire);self.assertNotIn('Body',wire)
+        self.assertLess(len(wire),300000)
+
+    def test_1477_write_sampling_is_bounded_for_all_fake_family_plans(self):
+        requests,discover=self.planning_fixture(1477)
+        plans=self.c.compile_application_plans(requests,discover);summary=self.c.preflight_application_plans(plans)
+        self.assertEqual(summary['fault_cases'],552);self.assertEqual(summary['recoveries'],2760)
+        self.assertTrue(all(f['targets']==5 for f in summary['families']))
+
+    def test_plan_announces_unchanged_required_acknowledgement_categories(self):
+        requests,discover=self.planning_fixture();summary=self.c.preflight_application_plans(self.c.compile_application_plans(requests,discover))
+        required=[]
+        for sector in (512,4096):
+            for op in ('checkpoint','autocheckpoint'):
+                required.extend([[op,sector,'database','write'],[op,sector,'database','sync']])
+            required.extend([['checkpoint',sector,'wal','truncate'],['autocheckpoint',sector,'wal','wal-header-reset']])
+        self.assertEqual(summary['required_acknowledgements'],sorted(required))
+        self.assertEqual(len(required),12)
+        with self.assertRaisesRegex(AssertionError,'new acknowledged-effect recovery coverage missing'):
+            self.coverage_fixture(False).require_complete()
+
+
+    def test_raw_and_unknown_lengths_are_bounded_separate_classes(self):
+        raw=[self.event(i,offset=frame_offset(i),length=100+i) for i in range(1,101)]
+        unknown=[dict(e,seq=e['seq']+100,wal_header='') for e in raw]
+        self.assertEqual(len({self.c.target_group(self.message(e)) for e in raw+unknown}),2)
+        self.assertTrue(all(self.c.coverage_bucket(self.message(e))['shape']=='wal-raw' for e in raw))
+        self.assertTrue(all(self.c.coverage_bucket(self.message(e))['shape']=='wal-unknown' for e in unknown))
+        self.assertTrue(all('length' not in self.c.coverage_bucket(self.message(e)) for e in raw+unknown))
+
+    def test_main_application_fault_loop_uses_preflight_generator(self):
+        tree=ast.parse(Path(self.c.__file__).read_text())
+        main=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='main')
+        loops=[n for n in main.body if isinstance(n,ast.For)]
+        self.assertEqual(len(loops),1)
+        loop=loops[0];self.assertEqual(loop.iter.func.id,'application_cases')
+        fault_calls=[n for n in ast.walk(main) if isinstance(n,ast.Call) and
+                     isinstance(n.func,ast.Name) and n.func.id=='execute' and
+                     any(isinstance(a,ast.Name) and a.id=='target' for a in n.args)]
+        self.assertEqual(len(fault_calls),1)
+        self.assertIn(fault_calls[0],list(ast.walk(loop)))
+
 
 
 if __name__=='__main__':

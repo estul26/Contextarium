@@ -9,6 +9,12 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
+Latest source-review proposal: [bounded sampling v4](#bounded-sampling-v4--source-review-only).
+Its 79 targeting/preflight, 26 classifier and 16 fixture test methods are prepared
+but **NOT RUN** for this candidate. No controller, bridge, fixture binary, probe,
+fault schedule or dedicated job was executed in this source-only pass. The eighth
+run below remains the latest executed evidence; no execution allowance was added.
+
 Latest executed R3 evidence: [eighth dedicated job](#eighth-dedicated-job--prerequisites-pass-bounded-matrix-times-out).
 The reviewed `627e4c0` source passed all 26 classifier, 52 targeting and 16 fixture
 tests, nine wrapper checks, prerequisites, five negative controls and both genuine
@@ -1859,3 +1865,163 @@ application code, migrations, dependencies, model/oracle/replay semantics, D1–
 previous workflow gate or ordinary CI behavior was changed. The original dirty
 patch and unrelated worktrees/artifacts were preserved. Architecture deviations:
 **NONE**. Evidence publication does not grant owner acceptance or merge readiness.
+
+## Bounded sampling v4 — source review only
+
+**SOURCE REVIEW ONLY — runtime NOT RUN. T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN;
+M2 acceptance PENDING; PR #6 DRAFT; execution slots ZERO.**
+
+Prepared from reporting checkpoint `cbe6dda9b859325f00ad242e93e6d8727390c0a1`.
+Last executed harness remains `627e4c0fc392410910ec71ed7d522d1a7e27eefe`; production
+application remains `b6f63a7564977555faffe6f9ca6b1a9c22910d43`. Only the controller,
+targeting/preflight test source and this evidence document change. No workflow
+wiring or gate is changed, and no new execution is authorized.
+
+The eighth run is preserved exactly: checkpoint/512 **345/345**, checkpoint/4096
+**345/345**, autocheckpoint/512 **870 completed**, total **1,560 cases / 7,800
+recoveries**, including **1,405 pre-fault acknowledged cases / 7,025 acknowledged
+recoveries**. Its timeout and interrupted `autocheckpoint-s512-b2262-ioerr` remain
+incomplete. Previous semantic-label qualifications, manifests and historical
+counts are unchanged. No historical case contributes to a future coded
+completeness check.
+
+### Coverage buckets versus exact injection checks
+
+Policy identifier: `bounded-coverage-bucket-nth-v4`. `coverage_bucket` controls
+sampling and Nth live-member selection. Its common key fields are **phase, name,
+role, operation, semantic meaning, flags and validated WAL page size**. Meaning
+comes from the unchanged format classifier; unknown context remains zero, not an
+invented page size. Additional key fields are:
+
+| I/O class | Additional sampling identity |
+| --- | --- |
+| Database/journal write (each phase separately) | `shape=write`, exact write length; physical offset excluded |
+| Complete WAL header/reset | `shape=wal-header-reset`, length 32, offset 0 |
+| Complete non-commit frame header | `shape=wal-frame`, length 24 |
+| Complete commit-marker header | `shape=wal-commit-marker`, length 24 |
+| Complete WAL page data | `shape=wal-page-full`; valid page-data start and length equal to the validated database page size |
+| WAL page-data fragment | `shape=wal-page-fragment`; incidental offset/length excluded |
+| WAL frame-header fragment | `shape=wal-frame-fragment`; incidental offset/length excluded |
+| WAL header fragment | `shape=wal-header-fragment`; incidental offset/length excluded |
+| Unsupported raw / unknown-context WAL write | Separate `wal-raw` / `wal-unknown` shapes; incidental offset/length excluded |
+| Sync, including WAL sync | `shape=sync`, exact offset/length; common flags remain exact |
+| Truncate, including WAL truncate | `shape=truncate`, exact requested size in offset and exact length |
+
+WAL append offsets are excluded from coverage buckets, except the mandatory
+header-reset offset zero. Different page sizes, flags, files, phases, meanings
+and full-page/fragment shapes remain different classes. Raw and fragment classes
+never satisfy the required complete commit-marker class. Database/journal length
+variation still makes separate buckets; this is not a global relaxation of write
+length or flags.
+
+Discovery samples first, middle (`count//2+1`), and last positions in each bucket,
+coalescing duplicate positions while retaining all labels. Execution selects the
+Nth **LIVE** member of that bucket; other buckets do not advance it. Physical
+baseline/live offsets, fragment lengths, sequence, flags, page context and meaning
+remain in planned/live evidence. The original `target_selector` projection is
+retained for baseline/live evidence, not reused as the sampling key or a physical
+address search. Changing an in-bucket live geometry does not claim it is the same
+logical page or transaction as the baseline member.
+
+Before an inject reply, the selected live candidate must pass the unchanged
+`verify_pending_trace`: exact live sequence plus the entire descriptor, including
+actual offset/length/flags, validated page size and byte-derived classification.
+Post-trace verification against that selected live descriptor is unchanged.
+Missing N fails; there is no search ahead, nearest address, retry, substitution or
+skip-to-PASS. Diagnostics retain planned bucket/position/count/labels and full
+baseline/live descriptors, bounded alternate-bucket counts, and decision/trace
+flags. No page bytes or request payloads are added to public evidence.
+
+### Full plan and execution-budget preflight
+
+`application_cases` yields nothing until all these steps complete:
+
+1. `compile_application_plans` discovers and validates every **12-family x
+   2-sector** no-fault baseline in checkpoint-first order. Genuine M1 fixtures
+   and the existing prerequisite probes/negative controls still precede this
+   stage; they are separate from injected application matrix cases.
+2. `preflight_application_plans` validates complete family/sector identity,
+   unique targets, bucket linkage, all first/middle/last positions and labels,
+   compatible modes and count/recovery arithmetic. It emits one `application-plan`
+   summary with each family's targets/cases/recoveries, per-bucket member counts
+   and sampled positions, required acknowledgement categories and five schedules.
+3. It checks **MAX_PLANNED_FAULT_CASES=1000** and
+   **MAX_PLANNED_RECOVERIES=5000**. Oversized plans fail before any application
+   injection, with no accepted-plan gate and no partial matrix execution.
+4. Only after both checks pass are all plans registered in fresh completeness
+   accounting, followed by every selected case in the unchanged family order.
+
+The summary logs at most 512 bucket rows, ordered by contribution on overflow;
+it reports total/omitted rows and hashes the full census. Every accepted plan fits
+in this summary: at least three compatible modes per target imply at most 333
+buckets under the 1,000-case cap. An oversized plan retains bounded contributor
+information and fails; only diagnostic rows may be bounded, never the actual
+coverage plan. The status remains PENDING until the subsequent plan gate passes.
+
+Expected boundedness is source-level arithmetic, not a measured application plan:
+**1,477** otherwise identical database writes at different offsets form one
+bucket, selecting positions **1/739/1477**, at most **3 targets / 15 fault cases /
+75 recoveries**. Repeated WAL fragment lengths likewise contribute at most three
+samples per shape/context/flags bucket. Sync and truncate buckets contribute at
+most 9 and 12 fault cases respectively. Checkpoint/autocheckpoint sampling thus
+scales with I/O classes rather than the number of written database pages or
+incidental fragment lengths. The actual 24-family/sector total and runtime remain
+unknown: distinct lengths/flags/context can still exceed the limits, and a
+case-count bound does not promise completion within a future time allowance.
+No application discovery or plan has been executed for v4.
+
+The limits protect one invocation; they do not replace acceptance criteria or
+permit skipping a selected case. Final acceptance still requires all 12 families,
+both sectors, every selected target and compatible fault, all five schedules,
+complete integrity/consistency/replay checks and every newly acknowledged-effect
+category. The acknowledgement categories are moved unchanged into a shared helper
+for preflight reporting and final checking. Complete-response receipt and external
+ledger write/flush/fsync ordering remain unchanged. The matrix order remains:
+checkpoint, autocheckpoint, restore, migration, fresh, empty-M1, no-op, create,
+data PATCH, metadata PATCH, archive, unarchive.
+
+### Prepared regressions and static evidence
+
+**79 targeting/preflight + 26 classifier + 16 fixture = 121 test methods; all
+NOT RUN for this source candidate.** The 52 existing targeting methods are retained
+and adjusted where v3 sampling expectations intentionally changed; 27 methods are
+added. Classifier/fixture suites and the synthetic WAL vector builder are unchanged.
+New coverage source includes:
+
+- 1,477 database offsets forming one bucket and exact three samples; database and
+  journal live-offset evidence plus private-trace mismatch refusal; separate
+  database lengths/flags.
+- Separate full-page, fragment, complete frame/commit/reset, raw and unknown WAL
+  classes; many varying fragment/raw lengths remaining bounded; exact live
+  fragment geometry before injection and preserved page-size/flag distinctions.
+- Wrong-bucket rejection, missing N failure, bucket tampering rejection, retained
+  first/middle/last labels and exact pre/post trace checks.
+- All 24 discoveries preceding the first yielded fault; late discovery failure
+  yielding none; actual main-loop wiring through the preflight generator.
+- Oversized case/recovery plans rejected independently, inclusive bounds, exact
+  arithmetic/mode counts, bounded oversized summaries, missing families/sectors,
+  duplicate targets and missing samples.
+- Existing checkpoint-first ordering, fresh completeness, all recovery schedules,
+  acknowledgement categories and external-ledger ordering tests retained.
+
+Performed locally: Python AST parsing and structural/count checks only; `gofmt -l`
+reported no changes; C `-fsyntax-only` passed against the cached pinned
+`go-sqlite3@v1.14.52` bundled header; whitespace and scope/privacy review passed.
+The header SHA-256 is
+`4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f`.
+Static AST comparisons confirm unchanged classifier, exact private-trace verifier,
+Model, consistency/oracle/replay, execution and fixture functions, prerequisite
+controls, fault modes and matrix ordering. C/Go VFS code, WAL geometry header,
+worker, production, migrations, dependencies, D1–D5 and every workflow are unchanged.
+No controller import/execution, Python test, bridge build/load, tagged build,
+fixture binary, fault/probe/negative-control schedule or dedicated job was run.
+Ordinary PR CI may run automatically; it does not execute these Python tests and
+is not R3 validation.
+
+Remaining gaps: v4 tests and complete no-fault plan preflight have no runtime
+evidence; the real plan may exceed the budget; no future v4 fault/recovery case
+has executed. The eighth run's missing families, acknowledged-effect categories
+and timeout diagnostic limits remain open. No acceptance gate is waived. Existing
+worktrees, the original dirty patch, local approval records, binaries and databases
+are preserved. Architecture deviations: **NONE**; this is a test-only sampling
+policy change proposed for review, not application or persistence redesign.
