@@ -136,7 +136,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Bounded R3 harness and standard-runner execution now authorized; validation and matrix not yet run. | Harness gates and exact executed storage-fault evidence are still required. |
+| T30 | BLOCKED | Both authorized jobs consumed; run 2 failed the instrumented no-fault application baseline. The acceptance matrix and remaining negative controls did not run. | Repair harness/diagnostics, obtain renewed execution authorization, validate all controls, then execute the required fault evidence. |
 
 ## Failure points and observation
 
@@ -184,17 +184,66 @@ and replay in fresh worker processes. Exact candidate-source equality is checked
 in the workflow; the harness SHA, amalgamation/header hashes, build environment,
 SQLite source ID/options, settings, target positions and seeds are logged.
 
-**Current result: R3 job 1 failed before execution.**
-[Run 36807842932](https://github.com/estul26/Contextarium/actions/runs/36807842932)
-used harness `658fdebba839b0f6a8d19eac366b19ee98bddc43` and failed during build:
-the clean runner's module directory was queried before dependencies were downloaded,
-so the SQLite header was unavailable. No harness validation, negative control or
-fault matrix executed. The workflow now downloads/verifies modules before resolving
-the pinned header and explicitly checks it exists. One authorized R3 job remains.
-Harness validation is pending; T18 remains PARTIAL and T30 remains BLOCKED. No application
-acceptance run may start unless the storage-model, native-VFS, native-application
-control and deliberate corruption controls all pass. No result below is inferred
-from compiling the harness.
+**Current result: HARNESS VALIDATION FAIL; T18 PARTIAL; T30/R3 BLOCKED.**
+Both authorized jobs have been consumed. The R3 workflow now has an unconditional
+false gate; no third job or rerun is authorized. No application acceptance fault
+matrix ran, and no R3 durability claim is made.
+
+| Run | Harness SHA | Executed result |
+| --- | --- | --- |
+| [36807842932](https://github.com/estul26/Contextarium/actions/runs/36807842932) | `658fdebba839b0f6a8d19eac366b19ee98bddc43` | FAIL during build, 26 seconds. The module directory was queried before downloading dependencies, leaving the pinned SQLite header unavailable. No validation or fault execution. |
+| [36808063489](https://github.com/estul26/Contextarium/actions/runs/36808063489) | `47924bace3c5b5defa7243ffc13e26ee251484fa` | Build/vet/module checks passed after fixing download ordering. Validation then failed, 32 seconds total: the instrumented application baseline child exited without a result/barrier. No acceptance matrix started. |
+
+Run 2's actually executed checks:
+
+| Check | Result / boundary |
+| --- | --- |
+| Independent in-memory storage model | PASS: live visibility, successful/failed sync, truncation, create/delete namespace and crash reconstruction assertions. |
+| Incorrect-sync negative control | PASS: the validator rejected a deliberately broken model that ignored successful syncs. |
+| Native raw-VFS probe | PASS: write `abcdef` at offset 0, sync, overwrite `XYZ` at offset 2, truncate to length 4, sync and syncDir delete. Direct reads confirmed visibility. |
+| Native raw-VFS failed-sync probe | PASS: injected IOERR at the first `xSync` on `probe.db`, phase `model-validation` (the deterministic probe's occurrence 3; sync has no byte range). The target acknowledgement and trace match were required; the failed sync did not establish modeled durability. |
+| Actual application with normal VFS | PASS: create response and complete oracle checked on the candidate's real engine/storage paths. |
+| Actual application with R3 VFS, no injected fault | FAIL: worker exited before returning a response/barrier. Its exit cause is unresolved. |
+| Lost-acknowledgement and broken revision/audit/idempotency negative controls | NOT RUN: the instrumented baseline failed before these controls. |
+| Application migration/mutation/commit/checkpoint fault matrix | NOT RUN: the prerequisite harness gate did not pass. |
+
+Seeds 17, 29 and 101 were used only in the small model's deterministic reconstruction
+checks. They were merely listed in the acceptance manifest; **no application
+retain/discard/reorder/torn schedule was executed**. The raw probe's IOERR is harness
+validation, not proof of T18's application commit-failure coverage.
+
+The public run-2 build manifest records Go 1.26.8 linux/amd64, GCC 13.3.0, Ubuntu
+image `20260927.320.1`, kernel `6.17.0-1022-azure`, 4 CPUs and `16373452 kB` total RAM.
+It records candidate/harness IDs and source hashes, including:
+
+- Bundled amalgamation SHA-256: `eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00`.
+- Bundled header SHA-256: `4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f`.
+- VFS C source SHA-256: `238edd41657a04511f3527f4dc940e1c66f192dcbddc78f0a96e5ed3598eec0a`.
+- Controller SHA-256: `ce1b0ba655b606ccf8452eda160aec8ec3ff56b3291f30b7b1fce794403b1dc5`.
+
+The pinned header declares SQLite 3.53.4 and source ID
+`2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`.
+This is a source declaration, not a retained R3 runtime observation.
+
+The worker queried SQLite source ID/options and PRAGMAs during successful preliminary
+operations, but the controller did not print those transient settings messages
+before failure. Those runtime values, the failing child's stderr/exit detail and
+full validation traces were not retained in job logs or artifacts. This diagnostic
+retention gap must be repaired before any renewed execution; do not substitute
+previous M2 settings evidence for missing R3 runtime evidence. No application trace
+manifest or recovery-state hash exists because the matrix never started.
+
+No artifacts or caches were uploaded. The two jobs used verified standard
+public-repository hosted runners; no paid runner/storage feature was requested or
+used ($0 additional compute/artifact cost under that service's public-repository
+pricing). Full test-owned files existed only on the disposable runner; GitHub job
+logs retain the build manifest and the results above. No personal database, host
+reboot, real-disk filling, local VM, or production fault switch was used.
+
+Ordinary Linux CI passed for both harness commits:
+[36807844653](https://github.com/estul26/Contextarium/actions/runs/36807844653) and
+[36808068288](https://github.com/estul26/Contextarium/actions/runs/36808068288).
+These runs do not validate the explicitly tagged R3 harness or close T18/T30.
 
 The declared `write-back-v1` model maintains live and durable file images. Successful
 file sync persists that file's bytes/length and creation; syncDir deletion persists
@@ -207,11 +256,11 @@ indexes are volatile and rebuilt. Profiles report 512/4096-byte sectors and no
 atomic-write/safe-append/powersafe-overwrite capabilities. Results cannot establish
 physical hardware, filesystem or dishonest-flush durability.
 
-The bounded matrix selects the first/middle/last observed positions for each
+The implemented but UNEXECUTED bounded matrix selects the first/middle/last observed positions for each
 application phase, file role and semantic I/O category, logs the exact mandatory
 positions, and uses discard/retain plus reorder/torn seeds 17, 29 and 101. It covers
 create, data/metadata PATCH, archive/unarchive, no-op, restore, explicit TRUNCATE
-checkpoint, default automatic checkpoint/WAL reset, fresh initialization and actual
+checkpoint, default automatic checkpoint/WAL reset, fresh initialization, empty-M1 upgrade and actual
 M1-binary adoption. Missing targets, trace drift, untraced file changes, failed
 negative controls, timeout or resource exhaustion fail the gate. This is bounded
 sampling, not exhaustive enumeration of every possible storage schedule.
@@ -229,5 +278,6 @@ Architecture deviations: **NONE**. D1–D5 are retained. Migration 001/002, depe
 accepted ADRs and CI behavior are unchanged. Malformed Host port forms are rejected
 consistently while valid loopback forms remain supported. There is no M3+ feature,
 authenticated actor, public audit query, deployment, or real personal data.
-No currently known application defect is being waived; the open acceptance gap is
-storage/power-loss evidence. The draft PR is not a request to merge.
+No application defect is established by the R3 harness failure. The unresolved
+harness baseline/diagnostic failure blocks storage/power-loss evidence; it is not
+waived or represented as application acceptance. The draft PR is not a request to merge.

@@ -18,9 +18,12 @@ concurrency:
 
 jobs:
   r3:
-    # Only the two deliberately marked owner-authorized pushes may start R3.
+    # Both owner-authorized R3 jobs have been consumed. Execution is disabled.
+    # Removing this false gate requires renewed explicit owner authorization.
+    # Original narrow gates are retained below for review.
     # Re-run attempts and unrelated pushes never execute this job.
     if: >-
+      false &&
       github.repository == 'estul26/Contextarium' &&
       github.event.repository.private == false &&
       github.run_attempt == 1 &&

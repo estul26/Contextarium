@@ -134,4 +134,10 @@ The gated R3 workflow permits only two explicitly marked pushes, rejects reruns,
 serializes jobs, and enforces a 60-minute timeout. It does not change ordinary CI.
 No artifact/cache upload, paid runner, personal VM or host storage fault is allowed.
 Harness validation and negative controls must pass before the application matrix.
-Current R3 status remains unexecuted; compilation is not acceptance evidence.
+Both authorized R3 jobs have now been consumed. The first failed during build; the
+second built successfully but failed its instrumented application baseline after
+only preliminary model/VFS controls passed. The acceptance fault matrix did not
+run. The workflow is disabled with an unconditional false gate. T18 remains PARTIAL,
+T30/R3 BLOCKED, and M2 acceptance pending. Repair the harness and diagnostic retention,
+then obtain renewed explicit execution authorization before removing that gate.
+Compilation and ordinary CI are not R3 acceptance evidence.
