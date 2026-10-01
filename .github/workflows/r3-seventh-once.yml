@@ -1,0 +1,354 @@
+name: Seventh one-shot R3 target-identity validation and matrix
+
+on:
+  push:
+    branches: [m2-implementation]
+    paths: ['.github/workflows/r3-seventh-once.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: contextarium-r3-9be4ed2-seventh-single-allowance
+  cancel-in-progress: false
+
+jobs:
+  validation-and-r3:
+    # One newly authorized job; seventh dedicated job historically. Setup failure
+    # consumes the slot. No dispatch, rerun, replacement or reporting-push run.
+    if: >-
+      github.repository == 'estul26/Contextarium' &&
+      github.event.repository.private == false &&
+      github.ref == 'refs/heads/m2-implementation' &&
+      github.event.before == '9be4ed2d87abbfce968dcb737338dc2554878229' &&
+      github.event.head_commit.message == 'test: wire seventh one-shot R3 validation' &&
+      github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '1'
+      CC: gcc
+      PYTHONDONTWRITEBYTECODE: '1'
+      M1_SOURCE: 14dc96ad18810202f63d5ac590822f117a787e82
+      REVIEWED_HARNESS: 9be4ed2d87abbfce968dcb737338dc2554878229
+      APPLICATION_CANDIDATE: b6f63a7564977555faffe6f9ca6b1a9c22910d43
+    steps:
+      - name: Enforce single public standard-runner slot
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('R3_REPORT_DEADLINE=' + str(int(time.time()) + 58*60) + '\n')
+          assert os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted'
+          assert os.environ['RUNNER_OS'] == 'Linux'
+          assert os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+          base = 'https://api.github.com/repos/estul26/Contextarium'
+          def read(path):
+              req = urllib.request.Request(base + path, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  return json.load(response)
+          assert not read('')['private']
+          runs = read('/actions/workflows/r3-seventh-once.yml/runs?branch=m2-implementation&event=push&per_page=100')
+          assert runs['total_count'] == 1, 'Single allowance already consumed; no replacement'
+          current = runs['workflow_runs'][0]
+          assert str(current['id']) == os.environ['GITHUB_RUN_ID']
+          assert current['head_sha'] == os.environ['GITHUB_SHA']
+          for run_id in (36807842932, 36808063489, 36816413358, 36818758680, 36823608907, 36868756735):
+              assert read('/actions/runs/' + str(run_id))['status'] == 'completed'
+          print(json.dumps({'kind':'authorization', 'historical_dedicated_job':7,
+              'new_slot':'1 of 1; consumed on job start', 'timeout_minutes':60,
+              'candidate':os.environ['APPLICATION_CANDIDATE'], 'harness':os.environ['REVIEWED_HARNESS'],
+              'workflow':os.environ['GITHUB_SHA'], 'paid_usage_authorized':0,
+              'artifact_upload':False, 'cache_upload':False}, sort_keys=True))
+          PY
+      - name: Check out exact reviewed harness
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 9be4ed2d87abbfce968dcb737338dc2554878229
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare marked runner-owned paths and verify pinned source
+        id: prepare
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$REVIEWED_HARNESS"
+          test -z "$(git status --porcelain)"
+          git diff --exit-code "$APPLICATION_CANDIDATE" -- cmd internal/engine internal/storage internal/server internal/app internal/config go.mod go.sum
+          r3_build=$(mktemp -d "$RUNNER_TEMP/contextarium-r3-seventh-build-XXXXXX")
+          touch "$r3_build/.contextarium-r3-owned"
+          mkdir "$r3_build/scratch"
+          touch "$r3_build/scratch/.contextarium-r3-owned"
+          echo "R3_BUILD=$r3_build" >> "$GITHUB_ENV"
+          echo "TMPDIR=$r3_build/scratch" >> "$GITHUB_ENV"
+          python3 - <<'PYCODE'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          assert shutil.disk_usage(os.environ['RUNNER_TEMP']).free >= 8*1024**3
+          print(json.dumps({'kind':'reviewed-source', 'harness':os.environ['REVIEWED_HARNESS'],
+              'application':os.environ['APPLICATION_CANDIDATE'], 'm1':os.environ['M1_SOURCE'],
+              'workflow':os.environ['GITHUB_SHA'], 'production_source_equal':True,
+              'image':os.getenv('ImageOS'), 'image_version':os.getenv('ImageVersion'),
+              'cpu':os.cpu_count(), 'meminfo':Path('/proc/meminfo').read_text().splitlines()[0],
+              'free_before_tests_bytes':shutil.disk_usage(os.environ['RUNNER_TEMP']).free,
+              'hashes':{p:hashlib.sha256(Path(p).read_bytes()).hexdigest()
+                  for p in ('scripts/r3-check.py','scripts/test_r3_fixture.py','scripts/test_r3_targeting.py')}},sort_keys=True))
+          PYCODE
+      - name: Run exactly 41 prepared targeting regressions before builds
+        id: targeting
+        timeout-minutes: 2
+        run: |
+          set -uo pipefail
+          set +e
+          # Execute the reviewed suite once. Parse its captured output without
+          # importing/running it again; any failure consumes this allowance.
+          python3 scripts/test_r3_targeting.py -v 2>&1 | tee "$R3_BUILD/targeting-tests.log"
+          pipeline_codes=("${PIPESTATUS[@]}")
+          export TARGETING_TEST_EXIT="${pipeline_codes[0]}" TARGETING_LOG_EXIT="${pipeline_codes[1]}"
+          python3 - <<'PYCODE'
+          import hashlib, json, os, re
+          from pathlib import Path
+          raw=Path(os.environ['R3_BUILD'],'targeting-tests.log').read_bytes()
+          output=raw.decode('utf-8',errors='replace')
+          passed=re.findall(r'^test_\S+ \([^\n]+\) \.\.\. ok$',output,re.M)
+          counts=re.findall(r'^Ran (\d+) tests? in [^\n]+$',output,re.M)
+          ok=(os.environ['TARGETING_TEST_EXIT']=='0' and os.environ['TARGETING_LOG_EXIT']=='0'
+              and len(passed)==41 and counts==['41'] and output.rstrip().endswith('\nOK')
+              and not re.search(r' \.\.\. (?:skipped|expected failure|unexpected success)|^FAIL|^ERROR|^OK \(',output,re.M))
+          result={'kind':'targeting-regressions','result':'PASS' if ok else 'FAIL',
+              'required_tests':41,'observed_counts':counts,'passing_test_lines':len(passed),
+              'test_exit':int(os.environ['TARGETING_TEST_EXIT']),'log_exit':int(os.environ['TARGETING_LOG_EXIT']),
+              'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),
+              'durability_evidence':False}
+          Path(os.environ['R3_BUILD'],'targeting-summary.json').write_text(json.dumps(result,sort_keys=True))
+          print(json.dumps(result,sort_keys=True),flush=True)
+          raise SystemExit(0 if ok else 1)
+          PYCODE
+      - name: Run exactly 16 prepared fixture regressions before builds
+        id: fixtures
+        timeout-minutes: 2
+        run: |
+          set -uo pipefail
+          set +e
+          # Execute the reviewed suite once. Parse its captured output without
+          # importing/running it again; any failure consumes this allowance.
+          python3 scripts/test_r3_fixture.py -v 2>&1 | tee "$R3_BUILD/fixture-tests.log"
+          pipeline_codes=("${PIPESTATUS[@]}")
+          export FIXTURE_TEST_EXIT="${pipeline_codes[0]}" FIXTURE_LOG_EXIT="${pipeline_codes[1]}"
+          python3 - <<'PYCODE'
+          import hashlib, json, os, re
+          from pathlib import Path
+          raw=Path(os.environ['R3_BUILD'],'fixture-tests.log').read_bytes()
+          output=raw.decode('utf-8',errors='replace')
+          passed=re.findall(r'^test_\S+ \([^\n]+\) \.\.\. ok$',output,re.M)
+          counts=re.findall(r'^Ran (\d+) tests? in [^\n]+$',output,re.M)
+          ok=(os.environ['FIXTURE_TEST_EXIT']=='0' and os.environ['FIXTURE_LOG_EXIT']=='0'
+              and len(passed)==16 and counts==['16'] and output.rstrip().endswith('\nOK')
+              and not re.search(r' \.\.\. (?:skipped|expected failure|unexpected success)|^FAIL|^ERROR|^OK \(',output,re.M))
+          result={'kind':'fixture-regressions','result':'PASS' if ok else 'FAIL',
+              'required_tests':16,'observed_counts':counts,'passing_test_lines':len(passed),
+              'test_exit':int(os.environ['FIXTURE_TEST_EXIT']),'log_exit':int(os.environ['FIXTURE_LOG_EXIT']),
+              'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),
+              'durability_evidence':False}
+          Path(os.environ['R3_BUILD'],'fixture-summary.json').write_text(json.dumps(result,sort_keys=True))
+          print(json.dumps(result,sort_keys=True),flush=True)
+          raise SystemExit(0 if ok else 1)
+          PYCODE
+      - name: Test exact rejection wrapper before any harness probes
+        id: wrapper
+        timeout-minutes: 2
+        run: |
+          python3 - <<'PY'
+          import contextlib, io, json, runpy, subprocess
+          from pathlib import Path
+          import os
+          # Import only in this authorized runner job. Never invoke main here;
+          # use the reviewed function unchanged with controlled callbacks.
+          def checks():
+              module = runpy.run_path('scripts/r3-check.py', run_name='r3_wrapper_validation')
+              expect = module['expect_reject']
+              reason = 'controlled expected rejection'
+              def raising(error):
+                  def callback(): raise error
+                  return callback
+              def check(name, callback, expected_error=None, same_object=False):
+                  output = io.StringIO(); caught = None
+                  try:
+                      with contextlib.redirect_stdout(output): expect(name, reason, callback)
+                  except BaseException as error: caught = error
+                  if expected_error is None:
+                      assert caught is None, 'Expected rejection was not accepted'
+                      assert json.loads(output.getvalue()) == {'kind':'negative-control','name':name,'result':'PASS','rejection':reason}
+                  else:
+                      assert output.getvalue() == '', 'Unexpected failure produced a PASS record'
+                      if same_object: assert caught is expected_error, 'Exception did not propagate unchanged'
+                      else:
+                          assert type(caught) is AssertionError and str(caught) == expected_error
+                  row = {'kind':'wrapper-check','name':name,'result':'PASS'}
+                  print(json.dumps(row,sort_keys=True),flush=True)
+                  return row
+              rows = [check('exact-assertion',raising(AssertionError(reason))),
+                  check('different-assertion',raising(AssertionError('unrelated invariant')),'negative control rejected for an unexpected reason'),
+                  check('no-rejection',lambda:None,'negative control failed to reject: no-rejection'),
+                  check('worker-assertion',raising(AssertionError('helper worker failed')),'negative control rejected for an unexpected reason')]
+              for name,error in [('timeout',subprocess.TimeoutExpired('synthetic-worker',1)),
+                  ('worker-exit',subprocess.CalledProcessError(2,'synthetic-worker')),
+                  ('malformed-data',json.JSONDecodeError('synthetic malformed JSON','{',0)),
+                  ('missing-field',KeyError('synthetic-field')),('failed-lookup',StopIteration())]:
+                  rows.append(check(name,raising(error),error,True))
+              assert len(rows) == 9
+              Path(os.environ['R3_BUILD'],'wrapper-results.json').write_text(json.dumps(rows,sort_keys=True))
+              print(json.dumps({'kind':'wrapper-validation','result':'PASS','checks':len(rows),
+                  'durability_evidence':False},sort_keys=True),flush=True)
+          try: checks()
+          except BaseException as error:
+              print(json.dumps({'kind':'wrapper-validation','result':'FAIL','error_type':type(error).__name__}),flush=True)
+              raise SystemExit(1) from None
+          PY
+      - name: Set up Go without uploaded cache
+        timeout-minutes: 3
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Verify source and build bundled-SQLite worker
+        id: build
+        timeout-minutes: 10
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$REVIEWED_HARNESS"
+          test -z "$(git status --porcelain)"
+          git diff --exit-code "$APPLICATION_CANDIDATE" -- cmd internal/engine internal/storage internal/server internal/app internal/config go.mod go.sum
+          test -z "$(gofmt -l internal/r3)"
+          go mod download
+          go mod verify
+          test "$(go list -m -f '{{.Version}}' github.com/mattn/go-sqlite3)" = v1.14.52
+          sqlite_dir=$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)
+          test -f "$sqlite_dir/sqlite3-binding.h"
+          export CGO_CFLAGS="-I$sqlite_dir"
+          go vet -tags r3 ./internal/r3/...
+          go build -tags r3 -o "$R3_BUILD/worker" ./internal/r3/worker
+          mkdir "$R3_BUILD/m1"
+          git archive "$M1_SOURCE" | tar -x -C "$R3_BUILD/m1"
+          (cd "$R3_BUILD/m1" && go build -o "$R3_BUILD/m1-binary" ./cmd/contextarium)
+          R3_BUILD_MANIFEST="$R3_BUILD" python3 - <<'PY'
+          import hashlib, json, os, platform, shutil, subprocess
+          from pathlib import Path
+          module = Path(subprocess.check_output(['go','list','-m','-f','{{.Dir}}','github.com/mattn/go-sqlite3'], text=True).strip())
+          build = Path(os.environ['R3_BUILD_MANIFEST'])
+          names = ['internal/r3/vfs/vfs.c','internal/r3/vfs/vfs.go','internal/r3/worker/main.go','scripts/r3-check.py','scripts/test_r3_fixture.py','scripts/test_r3_targeting.py','go.mod','go.sum']
+          hashes = {name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in names}
+          hashes.update({name:hashlib.sha256((module/name).read_bytes()).hexdigest() for name in ('sqlite3-binding.c','sqlite3-binding.h')})
+          for name in ('worker','m1-binary'):
+              hashes[name] = hashlib.sha256((build/name).read_bytes()).hexdigest()
+          for name in ('go.mod','go.sum'):
+              hashes['m1/'+name] = hashlib.sha256((build/'m1'/name).read_bytes()).hexdigest()
+          assert shutil.disk_usage(build).free >= 8*1024**3, 'Initial free reserve unavailable'
+          print(json.dumps({'kind':'build-manifest', 'candidate':os.environ['APPLICATION_CANDIDATE'],
+              'harness':os.environ['REVIEWED_HARNESS'], 'workflow':os.environ['GITHUB_SHA'],
+              'm1_source':os.environ['M1_SOURCE'], 'module':'github.com/mattn/go-sqlite3 v1.14.52',
+              'production_tree':subprocess.check_output(['git','rev-parse',os.environ['APPLICATION_CANDIDATE']+'^{tree}'],text=True).strip(),
+              'harness_tree':subprocess.check_output(['git','rev-parse','HEAD^{tree}'],text=True).strip(),
+              'm1_tree':subprocess.check_output(['git','rev-parse',os.environ['M1_SOURCE']+'^{tree}'],text=True).strip(),
+              'hashes':hashes, 'go':subprocess.check_output(['go','version'],text=True).strip(),
+              'compiler':subprocess.check_output(['gcc','--version'],text=True).splitlines()[0],
+              'image':os.getenv('ImageOS'), 'image_version':os.getenv('ImageVersion'),
+              'kernel':platform.release(), 'architecture':platform.machine(), 'cpu':os.cpu_count(),
+              'meminfo':Path('/proc/meminfo').read_text().splitlines()[0],
+              'modeled_scratch_cap_bytes':4*1024**3, 'free_reserve_bytes':2*1024**3,
+              'free_before_execution_bytes':shutil.disk_usage(build).free},sort_keys=True))
+          PY
+      - name: Run unchanged prerequisite gates then conditional bounded matrix
+        id: matrix
+        timeout-minutes: 56
+        run: |
+          set -euo pipefail
+          export RUNNER_TEMP="$R3_BUILD/scratch"
+          # Controller enforces its 55-minute budget, 4 GiB modeled scratch and
+          # 2 GiB reserve. One invocation only; no retry or source modification.
+          # Reserve reporting time inside the overall 60-minute job. Do not
+          # restart the controller if this single invocation times out.
+          remaining=$((R3_REPORT_DEADLINE - $(date +%s)))
+          test "$remaining" -gt 0
+          if [ "$remaining" -gt 3300 ]; then remaining=3300; fi
+          timeout --signal=KILL "${remaining}s" python3 scripts/r3-check.py --mode acceptance --worker "$R3_BUILD/worker" --m1-binary "$R3_BUILD/m1-binary" | tee "$R3_BUILD/results.jsonl"
+      - name: Preserve bounded evidence and report consumed allowance
+        if: always()
+        timeout-minutes: 2
+        env:
+          TARGETING_OUTCOME: ${{ steps.targeting.outcome }}
+          FIXTURE_OUTCOME: ${{ steps.fixtures.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          WRAPPER_OUTCOME: ${{ steps.wrapper.outcome }}
+          MATRIX_OUTCOME: ${{ steps.matrix.outcome }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, shutil
+          from pathlib import Path
+          def emit(**row): print(json.dumps(row,sort_keys=True),flush=True)
+          emit(kind='one-shot-stop',slot='consumed; no rerun or replacement',historical_dedicated_job=7,
+              candidate=os.environ['APPLICATION_CANDIDATE'],harness=os.environ['REVIEWED_HARNESS'],workflow=os.environ['GITHUB_SHA'],
+              targeting_regressions=os.environ['TARGETING_OUTCOME'],fixture_regressions=os.environ['FIXTURE_OUTCOME'],build=os.environ['BUILD_OUTCOME'],wrapper=os.environ['WRAPPER_OUTCOME'],matrix=os.environ['MATRIX_OUTCOME'],
+              acceptance='PENDING independent evidence reconciliation and owner acceptance',
+              paid_usage_authorized=0,artifact_upload=False,cache_upload=False)
+          name=os.environ.get('R3_BUILD')
+          if not name: raise SystemExit(0)
+          build=Path(name); runner=Path(os.environ['RUNNER_TEMP']).resolve()
+          assert build.resolve().parent == runner and (build/'.contextarium-r3-owned').is_file()
+          def sha(path):
+              h=hashlib.sha256()
+              with path.open('rb') as source:
+                  for block in iter(lambda:source.read(65536),b''):h.update(block)
+              return h.hexdigest()
+          for filename in ('targeting-tests.log','targeting-summary.json','fixture-tests.log','fixture-summary.json','wrapper-results.json'):
+              path=build/filename
+              if path.is_file():emit(kind='validation-evidence',name=filename,sha256=sha(path),bytes=path.stat().st_size)
+          result=build/'results.jsonl'
+          if result.is_file():
+              counts={}; malformed=0; manifest=hashlib.sha256(); cases=0; recoveries=0
+              with result.open('rb') as source:
+                  for line in source:
+                      try: row=json.loads(line)
+                      except ValueError: malformed+=1;continue
+                      kind=row.get('kind','missing-kind');counts[kind]=counts.get(kind,0)+1
+                      if kind=='case':
+                          cases+=1;recoveries+=len(row.get('results',[]))
+                          manifest.update(json.dumps(row,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode())
+              emit(kind='retained-log-manifest',sha256=sha(result),bytes=result.stat().st_size,
+                  record_counts=counts,malformed_records=malformed,cases=cases,recoveries=recoveries,
+                  case_manifest_sha256=manifest.hexdigest())
+          scratch=build/'scratch'
+          assert (scratch/'.contextarium-r3-owned').is_file()
+          # Read-only reporting of remaining test-owned evidence. Never print
+          # SQL, page hex, raw stderr, request bodies, credentials or full paths.
+          for root in sorted(scratch.glob('contextarium-r3-*')):
+              assert root.resolve().parent == scratch.resolve() and (root/'.contextarium-r3-owned').is_file()
+              for filename in ('trace.jsonl','acks.jsonl','worker-stderr.txt','m1/m1-stdout.txt','m1/m1-stderr.txt','empty-m1/m1-stdout.txt','empty-m1/m1-stderr.txt'):
+                  path=root/filename
+                  if not path.is_file():continue
+                  emit(kind='remaining-evidence',name=filename,sha256=sha(path),bytes=path.stat().st_size)
+                  if filename=='trace.jsonl':
+                      with path.open('rb') as source:
+                          source.seek(max(0,path.stat().st_size-65536));tail=source.read(65536)
+                      last=None
+                      for line in tail.splitlines():
+                          try: row=json.loads(line)
+                          except ValueError: continue
+                          if isinstance(row,dict):last=row
+                      if last:
+                          safe={k:last[k] for k in ('seq','offset','length','flags','rc','applied') if type(last.get(k)) is int}
+                          for k in ('stage','op','role','phase'):
+                              value=last.get(k)
+                              if isinstance(value,str) and len(value)<=64 and all(c.isalnum() or c=='-' for c in value):safe[k]=value
+                          emit(kind='last-retained-vfs-operation',**safe)
+          emit(kind='resource-boundary',remaining_scratch_bytes=sum(p.stat().st_size for p in scratch.rglob('*') if p.is_file()),
+              free_after_bytes=shutil.disk_usage(build).free,peak_usage='not-measured',modeled_cap_bytes=4*1024**3,reserve_bytes=2*1024**3)
+          # No artifact/cache upload. Only the disposable runner owns these paths;
+          # reporting never deletes evidence or creates another execution job.
+          PY
