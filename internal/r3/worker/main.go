@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/estul26/Contextarium/internal/engine"
 	"github.com/estul26/Contextarium/internal/r3/vfs"
 	"github.com/estul26/Contextarium/internal/storage"
+	"github.com/mattn/go-sqlite3"
 )
 
 type Input struct {
@@ -26,15 +28,51 @@ type Input struct {
 }
 
 var ctx = engine.WithAttribution(context.Background(), engine.Actor{Kind: "development_test", ID: "r3-worker"}, "req_00000000000000000000000000000300")
+var phase, query = "startup", ""
+var instrumented bool
+var protocolProgress bool
+
+// Only fixed phase/query labels and numeric SQLite codes cross the diagnostic
+// boundary. Error strings may contain SQL, data, or paths and are never printed.
+func diagnostic(kind, stage string, err error) {
+	x := map[string]any{"kind": kind, "stage": stage, "phase": phase, "query": query}
+	if err != nil {
+		x["reason"] = "operation-failed"
+		if errors.Is(err, sql.ErrNoRows) {
+			x["reason"] = "sql-no-rows"
+		}
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) {
+			x["reason"] = "sqlite-error"
+			x["code"], x["extended_code"] = int(sqliteErr.Code), int(sqliteErr.ExtendedCode)
+		}
+	}
+	_ = json.NewEncoder(os.Stderr).Encode(x)
+	if protocolProgress {
+		_ = json.NewEncoder(os.Stdout).Encode(x)
+	}
+}
+func startPhase(name string) {
+	phase, query = name, ""
+	diagnostic("worker-progress", "start", nil)
+	vfs.Phase(name)
+}
+func completed() { diagnostic("worker-progress", "complete", nil) }
 
 func must(err error) {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "R3_WORKER_ERROR", err)
+		diagnostic("worker-fatal", "failed", err)
 		os.Exit(2)
 	}
 }
 func emit(x any) { must(json.NewEncoder(os.Stdout).Encode(x)) }
-func block()     { emit(map[string]any{"kind": "done"}); var b [1]byte; os.Stdin.Read(b[:]); os.Exit(3) }
+func block() {
+	vfs.Report()
+	emit(map[string]any{"kind": "done"})
+	var b [1]byte
+	os.Stdin.Read(b[:])
+	os.Exit(3)
+}
 func main() {
 	root := flag.String("root", "", "owned test directory")
 	mode := flag.String("mode", "", "test role")
@@ -43,24 +81,32 @@ func main() {
 	aim := flag.Int("target", 0, "I/O occurrence")
 	fault := flag.String("fault", "none", "test fault")
 	sector := flag.Int("sector", 4096, "modeled sector bytes")
+	diagnosticOnly := flag.Bool("diagnostic-only", false, "one no-fault create, inspect, clean close; no probes or schedules")
 	flag.Parse()
+	protocolProgress = *mode == "run" || *mode == "native" || *mode == "probe"
+	if *diagnosticOnly && (*aim != 0 || *fault != "none" || (*mode != "native" && *mode != "run")) {
+		must(errors.New("invalid diagnostic role or fault configuration"))
+	}
 	path := filepath.Join(*root, "store.db")
 	if *mode == "inspect" {
+		startPhase("inspection")
 		db, err := sql.Open("sqlite3", "file:"+filepath.ToSlash(path)+"?mode=rw&cache=private&_foreign_keys=on&_synchronous=FULL&_busy_timeout=1000")
 		must(err)
 		defer db.Close()
 		db.SetMaxOpenConns(1)
 		emit(inspect(db))
+		completed()
 		return
 	}
 	if *mode == "probe" {
 		must(vfs.Init(*root, *trace, *aim, *fault, *sector))
-		vfs.Phase("model-validation")
+		startPhase("model-validation")
 		rc := vfs.Probe(filepath.Join(*root, "probe.db"))
 		emit(map[string]any{"kind": "response", "ok": rc == 0, "code": rc})
 		block()
 	}
 	if *mode == "fixture" {
+		startPhase("fixture")
 		db, err := storage.Open(ctx, path)
 		must(err)
 		fixture(db)
@@ -71,18 +117,32 @@ func main() {
 	must(err)
 	var input Input
 	must(json.Unmarshal(raw, &input))
+	switch input.Operation {
+	case "create", "patch", "metadata", "archive", "unarchive", "noop", "restore", "migration", "fresh", "empty-m1", "checkpoint", "autocheckpoint", "batch":
+	default:
+		must(errors.New("unknown operation"))
+	}
+	if *diagnosticOnly && (input.Operation != "create" || len(input.Batch) != 0) {
+		must(errors.New("diagnostic permits one create only"))
+	}
 	if *mode == "run" {
 		must(vfs.Init(*root, *trace, *aim, *fault, *sector))
-		vfs.Phase("open")
+		instrumented = true
 	}
+	startPhase("open")
 	if input.Operation == "migration" || input.Operation == "fresh" || input.Operation == "empty-m1" {
-		vfs.Phase(input.Operation)
+		startPhase(input.Operation)
 	}
 	db, err := storage.Open(ctx, path)
 	if err != nil {
+		diagnostic("worker-error", "failed", err)
+		if *diagnosticOnly {
+			must(err)
+		}
 		emit(map[string]any{"kind": "response", "ok": false, "error": "open-unavailable"})
 		block()
 	}
+	completed()
 	s := engine.New(db)
 	if *mode == "retry" {
 		if len(input.Batch) > 0 {
@@ -109,13 +169,13 @@ func main() {
 		block()
 	}
 	if input.Operation == "checkpoint" || input.Operation == "autocheckpoint" {
-		vfs.Phase("checkpoint-prepare")
+		startPhase("checkpoint-prepare")
 		count := 1
 		if input.Operation == "autocheckpoint" {
 			count = 40
 		}
 		for i := 0; i < count; i++ {
-			vfs.Phase(input.Operation)
+			startPhase(input.Operation)
 			var sub string
 			must(db.QueryRow("SELECT id FROM subjects ORDER BY id LIMIT 1").Scan(&sub))
 			body := []byte(fmt.Sprintf(`{"subject_id":%q,"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"payload":%q}}`, sub, strings.Repeat("c", 48000)))
@@ -127,16 +187,35 @@ func main() {
 			}
 		}
 		if input.Operation == "checkpoint" {
-			vfs.Phase("checkpoint")
+			startPhase("checkpoint")
 			var a, b, c int
 			err = db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&a, &b, &c)
 			emit(map[string]any{"kind": "response", "ok": err == nil && a == 0, "checkpoint": []int{a, b, c}})
 		}
 		block()
 	}
-	vfs.Phase("mutation-" + input.Operation)
+	startPhase("mutation-" + input.Operation)
 	result, err := mutate(s, input)
+	if err != nil {
+		diagnostic("worker-error", "failed", err)
+		if *diagnosticOnly {
+			must(err)
+		}
+	} else {
+		completed()
+	}
 	emit(map[string]any{"kind": "response", "ok": err == nil, "result_text": string(result.Data), "contract": result.Contract})
+	if *diagnosticOnly {
+		startPhase("inspection")
+		emit(map[string]any{"kind": "state", "value": inspect(db)})
+		completed()
+		startPhase("close")
+		must(db.Close())
+		completed()
+		vfs.Report()
+		emit(map[string]any{"kind": "done"})
+		return
+	}
 	block()
 }
 func mutate(s *engine.Service, in Input) (engine.MutationResult, error) {
@@ -171,17 +250,40 @@ func fixture(db *sql.DB) {
 	emit(map[string]any{"kind": "fixture", "settings": settings(db)})
 }
 func settings(db *sql.DB) map[string]any {
+	startPhase("settings")
 	result := map[string]any{}
+	begin := func(q string) {
+		query = q
+		diagnostic("worker-progress", "start", nil)
+		emit(map[string]any{"kind": "setting", "query": q, "status": "started"})
+	}
+	finish := func(q string, value any) {
+		result[q] = value
+		completed()
+		emit(map[string]any{"kind": "setting", "query": q, "status": "complete", "value": value})
+	}
 	for _, q := range []string{"sqlite_version()", "sqlite_source_id()"} {
+		begin(q)
 		var x string
 		must(db.QueryRow("SELECT " + q).Scan(&x))
-		result[q] = x
+		finish(q, x)
 	}
 	for _, q := range []string{"foreign_keys", "journal_mode", "synchronous", "busy_timeout", "wal_autocheckpoint", "page_size", "mmap_size"} {
+		begin(q)
 		var x any
-		must(db.QueryRow("PRAGMA " + q).Scan(&x))
-		result[q] = x
+		err := db.QueryRow("PRAGMA " + q).Scan(&x)
+		// SQLite 3.53.4 PragTyp_MMAP_SIZE emits no row on FCNTL NOTFOUND
+		// when SQLITE_MAX_MMAP_SIZE>0. Only our known shim diagnostic may
+		// be unsupported. No numeric zero is inferred and every other error
+		// (including a native-VFS no-row result) remains fatal.
+		if q == "mmap_size" && instrumented && errors.Is(err, sql.ErrNoRows) {
+			finish(q, map[string]any{"supported": false, "reason": "vfs-control-notfound-no-row"})
+			continue
+		}
+		must(err)
+		finish(q, x)
 	}
+	begin("compile_options")
 	rows, err := db.Query("PRAGMA compile_options")
 	must(err)
 	var options []string
@@ -192,8 +294,11 @@ func settings(db *sql.DB) map[string]any {
 	}
 	must(rows.Err())
 	must(rows.Close())
-	result["compile_options"] = options
-	result["max_open_connections"] = db.Stats().MaxOpenConnections
+	finish("compile_options", options)
+	begin("max_open_connections")
+	finish("max_open_connections", db.Stats().MaxOpenConnections)
+	query = ""
+	completed()
 	return result
 }
 func inspect(db *sql.DB) map[string]any {

@@ -2,12 +2,14 @@
 """Bounded, runner-only R3 controller. No production switches or artifact upload."""
 import argparse
 import copy
+from contextlib import contextmanager
 import hashlib
 import http.client
 import json
 import os
 from pathlib import Path
 import random
+import re
 import selectors
 import shutil
 import signal
@@ -23,6 +25,124 @@ TABLES = ('subjects', 'schemas', 'records', 'record_revisions', 'mutation_audit'
 SNAPSHOT = ('subject_id','namespace','schema_id','schema_version','data','key','sensitivity','provenance','status','created_at','updated_at')
 MARKER = '.contextarium-r3-owned'
 DEADLINE = time.monotonic() + 3300
+IDENTITY = {'candidate': CANDIDATE, 'harness': 'unavailable-before-manifest'}
+SETTINGS = ('sqlite_version()', 'sqlite_source_id()', 'foreign_keys', 'journal_mode',
+            'synchronous', 'busy_timeout', 'wal_autocheckpoint', 'page_size',
+            'mmap_size', 'compile_options', 'max_open_connections')
+# Raw stderr/protocol/trace remain private scratch. Only this bounded allowlist
+# reaches job logs; notably it contains no error strings, paths, SQL or page hex.
+LABELS = set(('startup open fixture inspection close settings model-validation checkpoint-prepare '
+              'create patch metadata archive unarchive noop restore migration fresh empty-m1 '
+              'checkpoint autocheckpoint batch start complete failed pre post database wal journal '
+              'write sync truncate delete operation-failed sql-no-rows sqlite-error '
+              'path-boundary file-not-allowed metadata-write trace-write trace-flush protocol-write '
+              'barrier-input-eof unexpected-barrier-release unknown-fault native-partial-write-failed '
+              'native-write-failed unexpected-mapped-pointer phase-length phase-label').split())
+LABELS.update('mutation-'+op for op in ('create','patch','metadata','archive','unarchive','noop','restore'))
+DIAGNOSTIC_KINDS = {'worker-progress', 'worker-error', 'worker-fatal', 'vfs-operation', 'vfs-fatal'}
+
+
+def safe_diagnostic(row):
+    if not isinstance(row, dict) or not isinstance(row.get('kind'), str) or row['kind'] not in DIAGNOSTIC_KINDS:
+        return None
+    safe = {'kind': row['kind']}
+    for key in ('phase', 'stage', 'op', 'role', 'reason'):
+        if key in row:
+            safe[key] = row[key] if isinstance(row[key], str) and row[key] in LABELS else 'redacted'
+    if 'query' in row:
+        safe['query'] = row['query'] if isinstance(row['query'], str) and row['query'] in (*SETTINGS, '') else 'redacted'
+    for key in ('seq', 'offset', 'length', 'flags', 'rc', 'applied', 'code', 'extended_code'):
+        if type(row.get(key)) is int and abs(row[key]) < 2**63:
+            safe[key] = row[key]
+    return safe
+
+
+def stderr_summary(raw, total=None):
+    # Read at most the last 64 KiB, publish at most eight allowlisted records.
+    raw = raw[-65536:]
+    records = []; suppressed = 0; last_pre = None; last_post = None
+    progress = {}
+    for line in raw.splitlines():
+        try: row = safe_diagnostic(json.loads(line))
+        except (ValueError, UnicodeError): row = None
+        if row is None:
+            suppressed += 1
+            continue
+        if row['kind'] == 'vfs-operation':
+            if row.get('stage') == 'pre': last_pre = row
+            else: last_post = row
+        else:
+            records.append(row)
+            track_progress(progress, row)
+    return dict(stderr_bytes=total if total is not None else len(raw),
+                stderr_tail_sha256=digest(raw), stderr_tail=records[-8:],
+                stderr_tail_truncated=(total or 0)>65536,
+                suppressed_tail_lines=suppressed, last_vfs_pre=last_pre,
+                last_vfs_post=last_post, **progress)
+
+
+def track_progress(progress, row):
+    if row.get('kind') != 'worker-progress': return
+    progress['last_phase'] = row.get('phase')
+    if row.get('query'): progress['last_settings_query'] = row['query']
+    if row.get('stage') == 'complete':
+        if row.get('query'): progress['last_completed_settings_query'] = row['query']
+        else: progress['last_completed_phase'] = row.get('phase')
+
+
+def exit_status(code):
+    return {'exit_code': code if code is not None and code >= 0 else None,
+            'signal': -code if code is not None and code < 0 else None}
+
+
+def log_worker_failure(stage, exc, code, terminated, stdout, stderr, progress=None, **extra):
+    # Exception text is deliberately excluded: OS/JSON errors can quote paths/data.
+    log(kind='worker-failure', **IDENTITY, failure_stage=stage,
+        error_type=type(exc).__name__, natural_exit=exit_status(code) if not terminated else exit_status(None),
+        controller_termination_performed=terminated, observed_exit=exit_status(code),
+        protocol=stdout, diagnostics=stderr, progress=progress or {}, **extra)
+
+
+def cleanup_child(child, selector=None):
+    try: return cleanup_child_actions(child, selector)
+    except BaseException as exc:
+        return {'controller_termination_performed':None, 'observed_exit':exit_status(None),
+                'cleanup_errors':[{'action':'cleanup','error_type':type(exc).__name__}]}
+
+
+def cleanup_child_actions(child, selector=None):
+    # Always secondary to the original failure. No exception text in job logs.
+    result = {'controller_termination_performed': False, 'cleanup_errors': [],
+              'exit_before_cleanup': exit_status(child.poll())}
+    actions = []
+    if child.poll() is None:
+        def terminate():
+            child.kill()
+            result['controller_termination_performed'] = True
+        actions += [('kill', terminate), ('wait', lambda: child.wait(timeout=5))]
+    actions += [(name, stream.close) for name, stream in (('stdin',child.stdin),('stdout',child.stdout),('stderr',child.stderr)) if stream]
+    if selector: actions.append(('selector', selector.close))
+    for name, action in actions:
+        try: action()
+        except BaseException as exc: result['cleanup_errors'].append({'action':name,'error_type':type(exc).__name__})
+    result['observed_exit'] = exit_status(child.poll())
+    return result
+
+
+@contextmanager
+def evidence_file(path):
+    stream = path.open('wb'); primary = None
+    try:
+        yield stream
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        try: stream.close()
+        except BaseException as exc:
+            try: log(kind='evidence-close-failed', **IDENTITY, error_type=type(exc).__name__)
+            except BaseException: pass
+            if primary is None: raise
 
 def require(value, message):
     if not value:
@@ -46,6 +166,50 @@ def canonical(value):
 def log(**fields):
     print(json.dumps(fields, sort_keys=True, separators=(',', ':')), flush=True)
 
+def setting_value(query, value):
+    # Bounded public representation, never arbitrary worker strings.
+    if query == 'mmap_size' and value == {'supported':False,'reason':'vfs-control-notfound-no-row'}:
+        return value
+    if type(value) is int and 0 <= value < 2**63: return value
+    if query == 'journal_mode' and value == 'wal': return value
+    if query == 'sqlite_version()' and isinstance(value,str) and re.fullmatch(r'[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}',value): return value
+    if query == 'sqlite_source_id()' and isinstance(value,str) and re.fullmatch(r'[0-9 :-]{19} [a-f0-9]{64}',value): return value
+    if query == 'compile_options' and isinstance(value,list):
+        return [x if isinstance(x,str) and len(x)<=128 and re.fullmatch(r'[A-Z0-9_]+(?:=-?[0-9]+)?',x) else 'redacted' for x in value[:256]]
+    return 'redacted'
+
+
+def log_setting(msg, case):
+    require(msg.get('query') in SETTINGS and msg.get('status') in ('started','complete'), 'malformed settings report')
+    fields = {'kind':'settings-query','case':case,'query':msg['query'],'status':msg['status']}
+    if 'value' in msg: fields['value'] = setting_value(msg['query'],msg['value'])
+    log(**fields)
+
+
+def check_settings(settings):
+    # Keep the existing required checks, with explicit optional mmap reporting.
+    require(settings['sqlite_version()']=='3.53.4' and settings['foreign_keys']==1 and
+            settings['journal_mode']=='wal' and settings['synchronous']==2 and
+            settings['busy_timeout']==1000 and settings['max_open_connections']==1,
+            'candidate settings changed')
+    require(settings['mmap_size'] == 0 or settings['mmap_size'] ==
+            {'supported':False,'reason':'vfs-control-notfound-no-row'}, 'unexpected mmap setting')
+
+
+def check_mmap_coverage(messages, settings):
+    reports = [m for m in messages if m['kind']=='vfs-coverage']
+    require(len(reports)==1, 'missing/repeated no-mmap coverage report')
+    report = reports[0]
+    require(report.get('fetch_policy')=='always-null-no-native-delegation' and
+            type(report.get('reads')) is int and report['reads']>0 and
+            type(report.get('fetches')) is int and report['fetches']>=0 and
+            report.get('null_fetches')==report['fetches'] and
+            type(report.get('mmap_control_rejections')) is int and report['mmap_control_rejections']>=0,
+            'no-mmap interception evidence missing')
+    if isinstance(settings['mmap_size'],dict):
+        require(report['mmap_control_rejections']>0,'unsupported mmap diagnostic without intercepted control')
+    log(kind='no-mmap-coverage', **{k:report[k] for k in ('fetch_policy','reads','fetches','null_fetches','mmap_control_rejections')})
+
 def owned(parent, name):
     path = parent / name
     path.mkdir(mode=0o700)
@@ -63,7 +227,33 @@ def budget(root):
     require(total < 4 * 1024**3, 'scratch bound reached')
 
 def run(*args, timeout=30):
-    return subprocess.check_output([str(a) for a in args], timeout=timeout, stderr=subprocess.PIPE)
+    # Fixture/inspection/retry failures need the same pre-cleanup evidence as
+    # streaming workers. These small helpers have no barrier protocol.
+    env = {k:v for k,v in os.environ.items() if k in ('PATH','LANG','TZ','TMPDIR')}
+    child = subprocess.Popen([str(a) for a in args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    output = b''; stderr = b''; primary = None
+    try:
+        output, stderr = child.communicate(timeout=timeout)
+        require(child.returncode == 0, 'helper worker failed')
+        return output
+    except BaseException as exc:
+        primary = exc
+        if isinstance(exc, subprocess.TimeoutExpired):
+            output, stderr = exc.output or b'', exc.stderr or b''
+        try:
+            log_worker_failure('helper-timeout' if isinstance(exc, subprocess.TimeoutExpired) else 'helper-exit',
+                               exc, child.poll(), False,
+                               {'received_bytes':len(output),'sha256':digest(output),'complete':False},
+                               stderr_summary(stderr, len(stderr)))
+        except BaseException: pass # Evidence failure cannot replace the original failure.
+        raise
+    finally:
+        cleanup = cleanup_child(child)
+        if cleanup['controller_termination_performed'] or cleanup['cleanup_errors']:
+            try: log(kind='worker-cleanup', **IDENTITY, **cleanup)
+            except BaseException: pass
+        if cleanup['cleanup_errors'] and primary is None:
+            raise AssertionError('helper cleanup failed; see bounded diagnostic')
 
 def read_trace(path):
     pending = {}
@@ -182,7 +372,10 @@ def write_input(path, request):
 def inspect(worker, path):
     return json.loads(run(worker, '-root', path, '-mode', 'inspect'))
 
-def execute(worker, root, case, request, initial, target=0, fault='none', sector=4096, probe=False, native=False):
+def execute(worker, root, case, request, initial, target=0, fault='none', sector=4096, probe=False, native=False, diagnostic=False):
+    if diagnostic:
+        require(target == 0 and fault == 'none' and not probe and request['Operation'] == 'create',
+                'diagnostic entry forbids targets, faults, probes and non-create requests')
     budget(root)
     live = owned(root, 'live') if probe else materialize(root, 'live', initial)
     config = root / 'input.json'
@@ -191,55 +384,117 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
     if trace.exists(): trace.unlink() # Controller-owned file in the marked run root.
     command = [str(worker), '-root', str(live), '-mode', 'probe' if probe else ('native' if native else 'run'), '-trace', str(trace), '-target', str(target), '-fault', fault, '-sector', str(sector)]
     if not probe: command += ['-input',str(config)]
-    ack = []; messages = []; hit = None
+    if diagnostic: command += ['-diagnostic-only']
+    ack = []; messages = []; hit = None; progress = {}
     # No credentials or Actions token are inherited by the instrumented process.
     env = {k:v for k,v in os.environ.items() if k in ('PATH','LANG','TZ','TMPDIR')}
-    with open(root / 'worker-stderr.txt', 'wb') as stderr, open(root / 'acks.jsonl','wb') as ledger:
+    stderr_path = root / 'worker-stderr.txt'
+    with evidence_file(stderr_path) as stderr, evidence_file(root / 'acks.jsonl') as ledger:
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, env=env)
         selector = selectors.DefaultSelector();selector.register(child.stdout, selectors.EVENT_READ)
-        buffer = b''; finished = False; deadline = time.monotonic()+45
+        buffer = b''; finished = False; done_received = False; deadline = time.monotonic()+45
+        received = 0; lines = 0; bad_line = None; terminated = False
+        stage = 'protocol-wait'; primary = None
         try:
             while not finished:
+                stage = 'protocol-timeout'
                 require(time.monotonic() < deadline, 'child response/barrier timeout')
                 if not selector.select(1): continue
+                stage = 'protocol-read'
                 part = os.read(child.stdout.fileno(),65536)
-                require(part, 'child exited without result/barrier')
-                buffer += part
+                if not part:
+                    # EOF can precede waitpid visibility. Briefly collect natural
+                    # status without signalling, then report before any cleanup.
+                    try: child.wait(timeout=.25)
+                    except subprocess.TimeoutExpired: pass
+                    stage = 'protocol-eof'
+                    require(False, 'child exited without result/barrier')
+                received += len(part); buffer += part
+                stage = 'protocol-size'
+                require(len(buffer) <= 8*1024**2 and received <= 32*1024**2, 'protocol bound exceeded')
                 while b'\n' in buffer:
                     line, buffer = buffer.split(b'\n',1)
-                    msg = json.loads(line);messages.append(msg)
+                    stage = 'protocol-json'; bad_line = {'bytes':len(line),'sha256':digest(line)}
+                    msg = json.loads(line)
+                    require(isinstance(msg,dict) and msg.get('kind') in
+                            {'worker-progress','worker-error','worker-fatal','setting','settings','target','response','state','vfs-coverage','done'},
+                            'malformed protocol envelope')
+                    lines += 1; bad_line = None; messages.append(msg)
+                    require(lines <= 2048, 'protocol record bound exceeded')
+                    safe = safe_diagnostic(msg)
+                    if safe: track_progress(progress, safe)
+                    if msg['kind'] == 'setting':
+                        stage = 'settings-report'
+                        log_setting(msg, case)
                     if msg['kind'] == 'target':
+                        stage = 'target-barrier'
                         require(hit is None and msg['seq'] == target and msg['mode'] == fault, 'wrong/repeated target')
                         hit=msg
                         if fault.startswith('cut-'): finished=True;break
                     if msg['kind'] == 'response' and msg['ok']:
+                        stage = 'acknowledgement-ledger'
                         # An acknowledged result is recorded only after complete receipt.
                         ack.append(msg)
                         ack_request={'Operation':'create','Key':msg['key'],'Body':msg['body_text']} if 'body_text' in msg else request
                         entry={'case':case,'request_sha256':digest(encoded(ack_request)),'response':msg,'response_sha256':digest(encoded(msg))}
                         ledger.write(encoded(entry)+b'\n');ledger.flush();os.fsync(ledger.fileno())
-                    if msg['kind'] == 'done': finished=True;break
-            child.kill();child.wait(timeout=5)
-            require(child.returncode == -signal.SIGKILL, 'test child did not die without cleanup')
+                    if msg['kind'] == 'done': finished=True;done_received=True;break
+            if diagnostic:
+                stage = 'diagnostic-natural-exit'
+                child.wait(timeout=5)
+                require(child.returncode == 0, 'no-fault diagnostic did not exit cleanly')
+                # No unread protocol bytes can hide an unexpected extra response.
+                buffer += child.stdout.read(8*1024**2+1)
+                require(not buffer, 'extra diagnostic protocol output')
+            else:
+                stage = 'planned-barrier-termination'
+                child.kill();terminated=True;child.wait(timeout=5)
+                require(child.returncode == -signal.SIGKILL, 'test child did not die without cleanup')
+            stage = 'fault-target-verification'
+            require((target == 0) == (hit is None), 'requested fault not reached')
+            if native:
+                image=image_files(live)
+                result={'image':image,'ack':ack,'messages':messages}
+            else:
+                stage = 'trace-validation'
+                events, all_events=read_trace(trace)
+                if hit:
+                    require(target in all_events, 'target missing from trace')
+                    chosen=all_events[target]
+                    require(chosen['op'] in ('write','sync','truncate'), 'fault outside approved operation')
+                model=Model(initial)
+                for event in events: model.consume(event)
+                # Also retained in diagnostic-only mode; no crash() schedules run.
+                require(image_files(live) == model.live, 'live file/model mismatch: untraced I/O or broken model')
+                result={'events':events,'all':all_events,'model':model,'ack':ack,'messages':messages,'trace_sha256':digest(trace.read_bytes()),'ack_sha256':digest((root/'acks.jsonl').read_bytes())}
+            stage = 'scratch-cleanup'
+            remove_owned(root,live)
+            return result
+        except BaseException as exc:
+            primary = exc
+            # Persist safe evidence to the job log before killing/closing anything.
+            try:
+                with stderr_path.open('rb') as source:
+                    total = source.seek(0, os.SEEK_END); source.seek(max(0,total-65536))
+                    summary = stderr_summary(source.read(65536), total)
+                log_worker_failure(stage, exc, child.poll(), terminated,
+                                   {'received_bytes':received,'complete_records':lines,'done_received':done_received,
+                                    'partial_bytes':len(buffer),'partial_sha256':digest(buffer),'malformed_record':bad_line},
+                                   summary, progress, case=case,
+                                   acknowledged=len(ack), target_reached=hit is not None)
+            except BaseException as diagnostic_error:
+                # Do not replace the primary failure even if evidence collection fails.
+                try: log(kind='diagnostic-collection-failed', **IDENTITY, failure_stage=stage,
+                         error_type=type(diagnostic_error).__name__, primary_error_type=type(exc).__name__)
+                except BaseException: pass
+            raise
         finally:
-            if child.poll() is None: child.kill();child.wait(timeout=5)
-            child.stdin.close();child.stdout.close();selector.close()
-    require((target == 0) == (hit is None), 'requested fault not reached')
-    if native:
-        image=image_files(live);remove_owned(root,live)
-        return {'image':image,'ack':ack,'messages':messages}
-    events, all_events=read_trace(trace)
-    if hit:
-        require(target in all_events, 'target missing from trace')
-        chosen=all_events[target]
-        require(chosen['op'] in ('write','sync','truncate'), 'fault outside approved operation')
-    model=Model(initial)
-    for event in events: model.consume(event)
-    # Native file writes not intercepted by the VFS must fail, never be silently ignored.
-    require(image_files(live) == model.live, 'live file/model mismatch: untraced I/O or broken model')
-    result={'events':events,'all':all_events,'model':model,'ack':ack,'messages':messages,'trace_sha256':digest(trace.read_bytes()),'ack_sha256':digest((root/'acks.jsonl').read_bytes())}
-    remove_owned(root,live)
-    return result
+            cleanup = cleanup_child(child, selector)
+            if primary is not None or cleanup['cleanup_errors']:
+                try: log(kind='worker-cleanup', **IDENTITY, case=case, **cleanup)
+                except BaseException: pass
+            if cleanup['cleanup_errors'] and primary is None:
+                raise AssertionError('worker cleanup failed; see bounded diagnostic')
 
 def record_snapshot(v):
     return {'id':v['record_id'], **{k:v[k] for k in SNAPSHOT}}
@@ -535,14 +790,57 @@ def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
         remove_owned(root,path)
     log(kind='validation',name='oracle-negative-controls',result='PASS')
 
+def no_fault_diagnostic(worker, root):
+    # This entry has no path to model_validation/raw_validation, negative_oracles,
+    # replay, target discovery, or Model.crash. No injected fault or crash kill.
+    fixture=owned(root,'fixture');run(worker,'-root',fixture,'-mode','fixture')
+    before=inspect(worker,fixture);consistency(before)
+    initial=image_files(fixture);schema=before['sqlite_schema']
+    request={'Operation':'create','Key':'r3-diagnostic-create','Body':checkpoint_body(before)}
+    for native, name in ((True,'diagnostic-native'),(False,'diagnostic-instrumented')):
+        result=execute(worker,root,name,request,initial,native=native,diagnostic=True)
+        settings=[m['value'] for m in result['messages'] if m['kind']=='settings']
+        require(len(settings)==1,'diagnostic settings missing/repeated')
+        check_settings(settings[0])
+        responses=[m for m in result['messages'] if m['kind']=='response']
+        states=[m['value'] for m in result['messages'] if m['kind']=='state']
+        require(len(responses)==len(result['ack'])==len(states)==1 and responses[0]['ok'],
+                'diagnostic requires exactly one accepted mutation and consistent inspection')
+        oracle(before,states[0],request,result['ack'],schema)
+        if not native: check_mmap_coverage(result['messages'],settings[0])
+        log(kind='no-fault-diagnostic-control', name=name, result='PASS',
+            state_sha256=digest(encoded(states[0])), response_sha256=digest(encoded(responses[0])),
+            trace_sha256=result.get('trace_sha256'), ledger_sha256=digest((root/'acks.jsonl').read_bytes()))
+    # Diagnostic success cannot close an acceptance case or unlock the matrix.
+    log(kind='FINAL', **IDENTITY, mode='no-fault-diagnostic', diagnostic='PASS',
+        fault_schedules='NOT RUN', negative_controls='NOT RUN', T18='PARTIAL', T30='BLOCKED', R3='OPEN', artifact_upload=False)
+    remove_owned(root,fixture)
+    require(root.parent.resolve()==Path(os.environ['RUNNER_TEMP']).resolve() and (root/MARKER).is_file(),'final cleanup ownership')
+    shutil.rmtree(root)
+
+
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--worker',type=Path,required=True);parser.add_argument('--m1-binary',type=Path,required=True);args=parser.parse_args()
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--mode',choices=('acceptance','no-fault-diagnostic'),default='acceptance')
+    parser.add_argument('--worker',type=Path,required=True)
+    parser.add_argument('--m1-binary',type=Path)
+    args=parser.parse_args()
+    if args.mode=='acceptance' and args.m1_binary is None: parser.error('acceptance requires --m1-binary')
     require(os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('GITHUB_REPOSITORY')=='estul26/Contextarium' and os.environ.get('RUNNER_OS')=='Linux','R3 execution restricted to authorized GitHub Linux job')
     require(os.environ.get('GITHUB_RUN_ATTEMPT')=='1','R3 automatic reruns are not authorized')
-    worker=args.worker.resolve();m1=args.m1_binary.resolve()
+    require(os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted','requires approved standard hosted runner')
+    worker=args.worker.resolve()
+    sources=('internal/r3/worker/main.go','internal/r3/vfs/vfs.c','internal/r3/vfs/vfs.go','scripts/r3-check.py')
+    IDENTITY.update(harness=run('git','rev-parse','HEAD').decode().strip(),
+                    source_sha256={name:digest(Path(name).read_bytes()) for name in sources},
+                    worker_sha256=digest(worker.read_bytes()))
     root=Path(tempfile.mkdtemp(prefix='contextarium-r3-',dir=os.environ['RUNNER_TEMP']));(root/MARKER).write_text('owned\n')
     require(shutil.disk_usage(root).free>=8*1024**3,'initial scratch/free reserve unavailable')
-    log(kind='manifest',candidate=CANDIDATE,harness=run('git','rev-parse','HEAD').decode().strip(),seeds=SEEDS,model='write-back-v1; byte-range tears; ordered namespace/truncate epochs; successful file-sync barriers',artifact_upload=False)
+    log(kind='manifest', **IDENTITY, mode=args.mode, seeds=SEEDS if args.mode=='acceptance' else [],model='write-back-v1; byte-range tears; ordered namespace/truncate epochs; successful file-sync barriers',artifact_upload=False)
+    if args.mode=='no-fault-diagnostic':
+        no_fault_diagnostic(worker,root)
+        return
+    m1=args.m1_binary.resolve()
     # No fault acceptance runs occur until every validation gate has passed.
     model_validation();raw_validation(worker,root)
     fixture=owned(root,'fixture');run(worker,'-root',fixture,'-mode','fixture')
@@ -579,8 +877,9 @@ def main():
             base=execute(worker,root,op+'-baseline',request,seedimage,sector=sector)
             require(all(m['ok'] for m in base['messages'] if m['kind']=='response'),'no-fault baseline failed')
             settings=next(m['value'] for m in base['messages'] if m['kind']=='settings')
-            require(settings['sqlite_version()']=='3.53.4' and settings['foreign_keys']==1 and settings['journal_mode']=='wal' and settings['synchronous']==2 and settings['busy_timeout']==1000 and settings['max_open_connections']==1,'candidate settings changed')
-            log(kind='settings',operation=op,sector=sector,value=settings)
+            check_settings(settings)
+            check_mmap_coverage(base['messages'],settings)
+            log(kind='settings',operation=op,sector=sector,value={q:setting_value(q,v) for q,v in settings.items() if q in SETTINGS})
             p=materialize(root,'baseline',base['model'].crash('retain',17));oracle(seedstate,inspect(worker,p),request,base['ack'],schema);remove_owned(root,p)
             targets=select_targets(base['events'],op)
             log(kind='schedule',operation=op,sector=sector,selection='first-middle-last per phase/role/semantic; all listed targets mandatory',targets=[{'seq':e['seq'],'phase':e['phase'],'role':e['role'],'op':e['op'],'meaning':key[2],'offset':e['offset'],'length':e['length']} for key,e in targets])
@@ -613,5 +912,7 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as exc:
-        log(kind='FINAL',result='FAIL',error_type=type(exc).__name__,reason=str(exc)[:500],T18='PARTIAL',T30='FAIL or incomplete; inspect reached cases')
-        raise
+        log(kind='FINAL', **IDENTITY, result='FAIL',error_type=type(exc).__name__,
+            reason='see bounded diagnostic records; raw exception text withheld',
+            T18='PARTIAL',T30='BLOCKED; incomplete harness evidence',R3='OPEN')
+        raise SystemExit(1) from None

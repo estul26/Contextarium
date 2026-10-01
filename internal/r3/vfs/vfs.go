@@ -7,6 +7,7 @@ package vfs
 #include <stdlib.h>
 int r3_init(const char*,const char*,long,const char*,int);
 void r3_phase(const char*);
+void r3_report(void);
 int r3_probe(const char*);
 */
 import "C"
@@ -31,3 +32,6 @@ func Probe(path string) int {
 	defer C.free(unsafe.Pointer(p))
 	return int(C.r3_probe(p))
 }
+
+// Report emits bounded counters, never database bytes. The shim never delegates xFetch.
+func Report() { C.r3_report() }
