@@ -139,5 +139,21 @@ second built successfully but failed its instrumented application baseline after
 only preliminary model/VFS controls passed. The acceptance fault matrix did not
 run. The workflow is disabled with an unconditional false gate. T18 remains PARTIAL,
 T30/R3 BLOCKED, and M2 acceptance pending. Repair the harness and diagnostic retention,
-then obtain renewed explicit execution authorization before removing that gate.
+then obtain renewed explicit execution authorization before any further R3 execution.
 Compilation and ordinary CI are not R3 acceptance evidence.
+
+The owner separately authorized exactly one 15-minute no-fault diagnostic job,
+without renewing the exhausted R3 budget. Its separate one-shot workflow ran the
+exact reviewed worker/controller commit
+`43e382e43010b7a35f73cc2c001902a5f85fbad7`, excluding the preserved uncommitted
+negative-control patch. [Run 36816413358](https://github.com/estul26/Contextarium/actions/runs/36816413358)
+passed in 25 seconds: native and instrumented application open, settings, one
+successful create/result and consistent-state checks. The instrumented mmap
+diagnostic explicitly reported unsupported/no row. Full details and limitations
+are in the [evidence document](m2-evidence.md).
+
+That single diagnostic slot is consumed. No faults, negative controls, crash
+schedules or acceptance matrix ran; no rerun/replacement is authorized. The
+original R3 false gate remains unchanged. Last full harness validation remains
+FAIL; T18 PARTIAL, T30 BLOCKED, D6/R3 OPEN and M2 acceptance PENDING. No-fault success
+does not authorize proceeding into R3. PR #6 remains DRAFT.

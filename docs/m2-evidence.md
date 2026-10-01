@@ -136,7 +136,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Both authorized jobs consumed; run 2 failed the instrumented no-fault application baseline. The acceptance matrix and remaining negative controls did not run. | Repair harness/diagnostics, obtain renewed execution authorization, validate all controls, then execute the required fault evidence. |
+| T30 | BLOCKED | Both original R3 jobs consumed. The separately authorized one-shot no-fault diagnostic passed, but the acceptance matrix and remaining negative controls did not run. | The single diagnostic slot is also consumed. Further execution requires renewed authorization; all prerequisite controls and required fault evidence remain necessary. |
 
 ## Failure points and observation
 
@@ -184,7 +184,7 @@ and replay in fresh worker processes. Exact candidate-source equality is checked
 in the workflow; the harness SHA, amalgamation/header hashes, build environment,
 SQLite source ID/options, settings, target positions and seeds are logged.
 
-**Current result: HARNESS VALIDATION FAIL; T18 PARTIAL; T30/R3 BLOCKED.**
+**Last full harness validation result: FAIL; T18 PARTIAL; T30/R3 BLOCKED.**
 Both authorized jobs have been consumed. The R3 workflow now has an unconditional
 false gate; no third job or rerun is authorized. No application acceptance fault
 matrix ran, and no R3 durability claim is made.
@@ -272,12 +272,100 @@ recovery connection uses the bundled SQLite and inspects state before migration
 retry, then the full oracle and repeated same-key requests check survival and no
 duplicate effects. No normal parent close/checkpoint is used as crash evidence.
 
+## Separately authorized one-shot no-fault diagnostic
+
+The owner clarified that the original two-job R3 allowance remained exhausted.
+One additional diagnostic job only was authorized: standard `ubuntu-24.04`, at
+most 15 minutes including setup/build/reporting, no rerun or replacement, and no
+fault probes, negative controls, crash schedules or acceptance matrix. A setup
+failure would also have consumed this slot. This was not another R3 allowance.
+
+[Run 36816413358](https://github.com/estul26/Contextarium/actions/runs/36816413358)
+**PASS**, attempt 1, one job, 25 seconds total
+(`2026-10-01T04:43:11Z`–`04:43:36Z`). The slot is now consumed. Execution stopped.
+
+- Workflow commit: `fa86676e26b6b91eed09b3042287a4ae1e8f4f2a`.
+- Reviewed worker/controller checkout: `43e382e43010b7a35f73cc2c001902a5f85fbad7`.
+- Application candidate: `b6f63a7564977555faffe6f9ca6b1a9c22910d43`.
+- Worker binary SHA-256: `5f4562da123091a309a9f3a9ce62582c7743add3309b4a76cf46f2c0b23d8c9f`.
+- Controller SHA-256: `9148314cff94dbe98d45055cd67778940fab8a7655cb19ea0c36c46a5043c0df`.
+
+The separate workflow checks out the exact reviewed source in a clean checkout;
+the uncommitted negative-control patch was preserved and excluded. Its push/path,
+parent-commit, commit-message, attempt and run-count gates admit only this slot.
+The original R3 workflow's unconditional false gate is unchanged. No manual
+dispatch or rerun occurred, and no production source, migration or dependency
+changed. The only diagnostic command was:
+
+```sh
+python3 scripts/r3-check.py --mode no-fault-diagnostic --worker "$R3_DIAG_BUILD/worker"
+```
+
+Both `diagnostic-native` and `diagnostic-instrumented` passed: actual application
+open, incremental settings, one successful create/result, integrity/FK checks and
+consistent-state inspection of the application stores. The oracle checked exact
+content and record/revision/audit/idempotency linkage. The instrumented control
+also compared actual files with the traced model. This is a no-fault diagnostic,
+not recovery or fault-model validation.
+
+Runtime settings in both controls: SQLite 3.53.4; source ID
+`2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`;
+WAL, synchronous=2 (FULL), foreign_keys=1, busy_timeout=1000,
+wal_autocheckpoint=1000, page_size=4096 and max_open_connections=1.
+Native mmap_size=0; instrumented mmap_size was explicitly unsupported with reason
+`vfs-control-notfound-no-row`. This confirms the no-result-row mechanism in this
+reviewed harness. It does not recover the historical failed child's missing
+stderr/exit details or prove that run's root cause.
+
+The instrumented trace reported 110 reads, five mmap-control rejections and zero
+fetches/null-fetches; policy was `always-null-no-native-delegation`. No mapped read
+was observed. With no xFetch call, its guard path was not dynamically exercised.
+Compile options were logged, but three entries were sanitized as `redacted`;
+their exact runtime values are not retained. Successful execution also did not
+exercise EOF/timeout/malformed-output failure-diagnostic paths.
+
+Instrumented evidence SHA-256 values retained in job logs:
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Independent acknowledgement ledger | `a484c37c5823e243361fbabd0578815ea8139048633989d3bc2f15aa91fda962` |
+| Successful response | `145deb4b062b61fcefc6ba2702bb3e3a5323932080c3065f9a11baf0516be87f` |
+| Consistent state | `c43b5780df7c82115de26b575a698c653f365887dc9b5db98b7d1e9bac61b664` |
+| VFS trace | `c08c62007b8b3955c517b4d065224304ee57ba43573038a18895b3b3584d4f84` |
+
+The build manifest also retains all four reviewed harness source hashes, bundled
+amalgamation/header hashes and dependency-file hashes. Environment: Go 1.26.8,
+GCC 13.3.0, Ubuntu image `20260920.314.1`, x86_64 kernel `6.17.0-1022-azure`,
+4 CPUs and 16373452 kB RAM. The 4 GiB modeled-data cap and 2 GiB free-space reserve
+checks passed; no peak-usage measurement was recorded. Only synthetic fixtures
+and test-owned runner temporary paths were used. No personal/runtime database,
+host reboot, real-disk filling, VM or production fault switch was used.
+
+No artifacts or caches were uploaded (run artifacts API count: zero). Sanitized
+settings, manifests, hashes and results survive in job logs; full test-owned
+database/trace files were temporary on the disposable runner. Only standard
+public-repository hosted compute was used, with no paid service requested or
+used ($0 additional compute/artifact cost under public-runner pricing).
+
+[Ordinary Linux CI 36816417481](https://github.com/estul26/Contextarium/actions/runs/36816417481)
+passed at workflow commit `fa86676e26b6b91eed09b3042287a4ae1e8f4f2a`.
+It is separate from the diagnostic and supplies no R3 evidence.
+
+**Diagnostic PASS only. Last full harness validation remains FAIL.** No fault
+targets, seeds/schedules, negative controls or acceptance matrix ran in this job.
+T18 remains **PARTIAL**, T30 **BLOCKED**, D6/R3 **OPEN**, M2 acceptance **PENDING**,
+and PR #6 **DRAFT**. Successful no-fault operation does not establish write/sync
+failure handling, simulated persistence-loss survival or physical durability.
+Further execution requires separate owner authorization; there is no remaining
+R3 or diagnostic slot.
+
 ## Review boundary
 
 Architecture deviations: **NONE**. D1–D5 are retained. Migration 001/002, dependencies,
 accepted ADRs and CI behavior are unchanged. Malformed Host port forms are rejected
 consistently while valid loopback forms remain supported. There is no M3+ feature,
 authenticated actor, public audit query, deployment, or real personal data.
-No application defect is established by the R3 harness failure. The unresolved
-harness baseline/diagnostic failure blocks storage/power-loss evidence; it is not
-waived or represented as application acceptance. The draft PR is not a request to merge.
+No application defect is established by the historical R3 harness failure. The
+later no-fault diagnostic passed, but prerequisite controls and storage/power-loss
+evidence remain incomplete. These gaps are not waived or represented as application
+acceptance. The draft PR is not a request to merge.
