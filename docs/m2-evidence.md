@@ -9,6 +9,8 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
+Current source proposal: [target identity refinement](#target-identity-refinement--source-review-only-runtime-not-run); 41 prepared targeting tests and refined runtime behavior **NOT RUN**.
+
 Latest executed R3 evidence: [sixth dedicated job](#sixth-dedicated-job--targeting-tests-pass-matrix-stopped-before-mismatched-injection).
 All 26 targeting tests, 16 fixture tests and prerequisites passed. The matrix failed
 before a mismatched injection after 379 cases / 1,895 recoveries. T18 PARTIAL,
@@ -1030,6 +1032,130 @@ changes only the new one-shot workflow and this evidence document. Every reviewe
 source file, migration, dependency, approved contract, ordinary CI and previous
 workflow remains unchanged. The subsequent reporting commit is identified in PR
 #6, avoiding a self-referential SHA here.
+
+## Target identity refinement — source review only, runtime NOT RUN
+
+This source-only refinement starts at reporting checkpoint
+`d40704f97a3716f5e404b37b045e1ce8999fd0ee`. The last executed harness remains
+`6fbdc611672f493626ab758dfc7ce1e9682307a1`; the application remains
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`. **ZERO additional execution slots.**
+No controller/test import or execution, tagged build, fixture binary, probe,
+negative control, fault schedule, dispatch or rerun is part of this pass.
+
+The sixth run's **379 completed cases / 1,895 recoveries** remain historical
+partial evidence at their original source and schedules. In
+`noop-s512-b39-cut-after`, the baseline first `mutation-noop` WAL commit-marker
+write was sequence 39, offset 70072, length 24. The live first marker was sequence
+45, offset 82432, length 24, after additional ordinary frame writes. Full-descriptor
+comparison rejected it before injection. No target was selected/reached and no
+recovery result exists for that failed case. The differing layout's cause remains
+**unproven**. A prepared fake-trace test uses the retained metadata; it does not
+replay the old run or convert that failure into passing evidence.
+
+### Selector identity versus recorded geometry
+
+The proposed policy is explicitly versioned
+`semantic-position-wal-geometry-v2`. Full diagnostic descriptors retain
+phase/name/role/op/meaning/offset/length/flags, with sequence recorded alongside.
+`TARGET_FIELDS` still includes offset. Matching projects a separate selector;
+all classes require exact phase, file name, role, operation, semantic meaning,
+length and flags, plus the explicit position in the selected semantic group.
+
+| Operation class | Additional selector identity | Observed geometry |
+| --- | --- | --- |
+| WAL append frame/commit-marker write | Positive offset required; exact write length and flags retained. Commit-marker shape requires 24 bytes and unchanged private-byte semantic classification. | Exact positive append offset may differ from discovery; global sequence may differ. Both baseline and live values are recorded. |
+| WAL header reset | Offset **0**, exact length/flags; a nonzero header-reset claim is rejected. | Sequence only; no offset relaxation. |
+| Truncate | Exact requested size (the VFS `offset` field), length and flags. | Sequence only; a different size fails. |
+| Sync | Exact offset/length and sync flags, including FULL/data-only distinctions. | Sequence only; flags are never dropped. |
+| Database/journal write | Exact physical offset, length and flags. | Sequence only; no WAL relaxation. |
+
+**Database/journal decision for review:** retain physical offset as identity.
+These writes address database pages or journal content; this harness has no
+reviewed semantic page identity to replace the address safely. They can still
+fail reproducibility if layout changes. That remains an explicit possible block,
+not permission to inject at another page or relax the requirement later.
+
+No production entropy/time or C/Go protocol change is needed. The same test VFS
+blocks before native write/sync/truncate; the controller chooses against the live
+operation. The private pre-trace check remains **exact** against that live
+message, including its actual offset, sequence, length, flags and byte-derived
+semantic category. Allowing discovery-to-live WAL geometry differences never
+allows private-trace-to-live disagreement. After execution, the trace must still
+equal the selected full live descriptor. Wrong phase/file/role/op/category cannot
+receive injection; a missing required target remains a failure.
+
+### Ordered prefix and evidence
+
+The matched prefix now contains stable selectors/shapes. A separate baseline
+prefix preserves full descriptors and sequence numbers. Each selected-group
+member must match the selector at that position before the counter advances;
+changed shape, strict offset or distinguishable ordering fails before an inject
+reply. Events in other groups do not advance this counter.
+
+**Indistinguishable-member rule:** members with identical stable selectors are
+resolved solely by their Nth group position. This includes WAL append writes that
+differ only in positive physical offset. Inserting/removing an indistinguishable
+member is not detectable as a different logical page/transaction; it counts toward
+the explicit position. A distinguishable prefix change fails; a shortened prefix
+fails if the required position is never reached. There is no search ahead for a
+nearby target, retry until a trace matches, or skip-to-PASS.
+
+The unchanged discovery policy selects first/middle/last positions within each
+recorded no-fault phase/role/semantic group, retaining collapsed labels. These are
+discovery positions, not a claim that the selected live occurrence is necessarily
+the midpoint/last of a changed counterfactual trace. Required families, modes,
+sector sizes and recovery schedules remain mandatory.
+
+Every permitted prefix offset change emits allowlisted `target-geometry` metadata
+with its baseline/live descriptor and sequence and explicit group position before
+a reply. Its stage says selector match **before private-trace verification**;
+it is not an injection/recovery PASS record. Successful case reports retain
+`planned`, full `observed` descriptor/sequence and `geometry_changed`; failure
+diagnostics retain selected observations and verification/decision flags. The
+versioned `prefix_sha256` now hashes selectors; `baseline_prefix_sha256` separately
+hashes baseline descriptors. Historical manifests are not rewritten or interpreted
+using the new policy. No page bytes, SQL, payloads or private paths are added.
+
+### Prepared regression source and static checks
+
+The targeting suite now contains **41 prepared tests, NOT RUN** (15 added; existing
+range/prefix tests revised for this explicit policy). Coverage includes moved first
+commit marker, baseline/live diagnostics and reports, wrong phase/file/role/op and
+semantic category, incompatible length/flags, nonzero WAL header, zero append
+position, changed truncate size, strict database/journal ranges, stable-prefix
+shape/order, indistinguishable members and explicit positions, stale/malformed or
+geometry-disagreeing private trace, verification before injection, missing targets,
+first/middle/last, and the existing completeness/acknowledgement gates. The previous
+blanket range-failure test now asserts both allowed WAL geometry and rejected
+database/journal movement; it was not deleted. The 16 fixture tests are unchanged
+and were not rerun. Earlier 26/16 passing summaries remain evidence only for the
+sixth-run source.
+
+**Static checks PASS:** Python AST parsing/counts and structural comparison; Go
+formatting (`gofmt -l internal/r3`); C syntax only (`cc -fsyntax-only` against the
+cached pinned go-sqlite3 v1.14.52 bundled header); whitespace, scope, links and
+public-content review. No executable was built or test/controller imported.
+AST comparison retains `Model`, `oracle`, consistency/replay, successful-sync
+semantics, private-trace verification, selection, fault modes, all five schedules,
+`AcceptanceCoverage`, external-ledger acknowledgement ordering, prerequisites,
+negative controls, fixtures, no-fault mode, settings and resource limits unchanged.
+
+New runtime feasibility and regression outcomes are **NOT RUN**. Mandatory remaining
+acceptance includes complete no-op, restore, adoption/migration, fresh and empty-M1
+initialization, checkpoint database writes/sync, WAL truncate/reset, both sector
+sizes, every planned fault mode/all five recovery schedules, and recovery of new
+acknowledged effects recorded after a complete successful response. Fifth/sixth
+partial evidence cannot count as execution of this refined harness.
+
+Only the controller, focused targeting test source and this evidence note change.
+Production, migrations, dependencies, approved D1–D5, C/Go harness files, ordinary
+CI and every R3 workflow/gate remain unchanged. Ordinary PR CI may run automatically;
+the original false-gated R3 workflow may record a skipped run with zero steps.
+Neither is R3 validation. No new workflow, permission or execution slot is added.
+
+**T18 PARTIAL · T30 BLOCKED · D6/R3 OPEN · M2 acceptance PENDING · PR #6 DRAFT ·
+Execution slots ZERO.** Architecture deviations: **NONE**; this test-selection
+refinement is explicitly proposed for source review. No merge, deployment or M3.
 
 ## Review boundary
 

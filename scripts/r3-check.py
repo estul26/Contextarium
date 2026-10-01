@@ -520,8 +520,10 @@ def inspect(worker, path):
     return json.loads(run(worker, '-root', path, '-mode', 'inspect'))
 
 # Discovery keeps the approved first/middle/last samples. Sequence numbers only
-# identify trace rows; fault identity is the descriptor plus its group prefix.
+# identify trace rows. Full descriptors remain evidence; only the explicitly
+# projected selector and ordered semantic-group position identify a target.
 TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags')
+TARGET_POLICY = 'semantic-position-wal-geometry-v2'
 FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
 REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
                        'checkpoint','autocheckpoint','migration','fresh','empty-m1')
@@ -552,7 +554,31 @@ def candidate_descriptor(event):
     require(event['meaning'] in meanings,'invalid target semantic')
     for name in ('offset','length','flags'):
         require(type(event[name]) is int and 0<=event[name]<2**63,'invalid target range')
+    if event['op']=='write':
+        require(event['length']>0,'empty target write')
+        if role=='wal':
+            require((event['meaning']=='wal-header-reset') == (event['offset']==0),
+                    'WAL header/append offset mismatch')
+            if event['meaning']=='wal-commit-marker':
+                require(event['length']==24,'invalid WAL commit-marker shape')
     return {k:event[k] for k in TARGET_FIELDS}
+
+
+def target_selector(descriptor):
+    """Only positive WAL append offsets are geometry, never every offset.
+
+    Exact length/flags and phase/file/role/op/meaning always remain identity.
+    Header-reset offset zero, truncate size, sync offset/flags and database or
+    journal write offsets stay exact. The latter have no reviewed semantic page
+    identity with which to safely replace their physical address.
+    """
+    descriptor=candidate_descriptor(descriptor)
+    selector=dict(descriptor)
+    append=(descriptor['role']=='wal' and descriptor['op']=='write' and
+            descriptor['meaning'] in ('wal-frame','wal-commit-marker'))
+    selector['offset_policy']='positive-wal-append' if append else 'exact'
+    if append:del selector['offset']  # Its positive range was checked above.
+    return selector
 
 
 def target_group(descriptor):
@@ -560,43 +586,65 @@ def target_group(descriptor):
 
 
 def make_target(items, index, samples):
-    prefix=[event_descriptor(e) for e in items[:index+1]]
-    return {'descriptor':prefix[-1], 'prefix':prefix, 'samples':samples,
+    baseline=[dict(event_descriptor(e),seq=e['seq']) for e in items[:index+1]]
+    prefix=[target_selector(e) for e in baseline]
+    return {'descriptor':event_descriptor(items[index]), 'selector':prefix[-1],
+            'prefix':prefix, 'baseline_prefix':baseline, 'samples':samples,
             'group_position':index+1,'group_count':len(items),'baseline_seq':items[index]['seq']}
 
 
 def target_summary(plan):
-    return {k:plan[k] for k in ('descriptor','samples','group_position','group_count','baseline_seq')} | {
-        'prefix_sha256':digest(encoded(plan['prefix']))}
+    return {k:plan[k] for k in ('descriptor','selector','samples','group_position','group_count','baseline_seq')} | {
+        'identity_policy':TARGET_POLICY,'prefix_sha256':digest(encoded(plan['prefix'])),
+        'baseline_prefix_sha256':digest(encoded(plan['baseline_prefix']))}
+
+
+def target_evidence(plan, event):
+    descriptor=event_descriptor(event)
+    require(target_selector(descriptor)==plan['selector'],'fault schedule selector drift')
+    return {'planned':target_summary(plan),'observed':dict(descriptor,seq=event['seq']),
+            'geometry_changed':['offset'] if descriptor['offset']!=plan['descriptor']['offset'] else []}
 
 
 class TargetMatcher:
     """Strict ordered prefix within ONE discovered phase/role/semantic group.
 
-    Other groups may change length; matching-group insertions, reordering or
-    descriptor changes fail before injection. Repeated identical descriptors
-    occupy distinct prefix positions: the Nth planned position is explicit.
+    Other groups may change length. Each selected-group member must match its
+    stable selector/shape before advancing the explicit position. Changed shape,
+    order or strict offset fails. Identical selectors (including WAL writes at
+    different positive offsets) are indistinguishable and resolved by Nth group
+    position; insertion/removal of such members cannot be detected as identity.
     First/middle/last refer to the recorded no-fault discovery group, not a
     promise about the suffix of an execution altered by the injected failure.
     """
     def __init__(self, plan):
         self.plan=plan;self.group=target_group(plan['descriptor']);self.seen=0
         self.last_seq=0;self.last_observed=[];self.selected_seq=None
+        self.selected_descriptor=None;self.geometry_change=None
         self.trace_verified=False;self.decision_sent=False;self.ack_before_fault=0
-        require(plan['prefix'] and plan['prefix'][-1]==plan['descriptor'],'invalid target prefix')
+        require(plan['prefix'] and plan['prefix'][-1]==plan['selector'] and
+                target_selector(plan['descriptor'])==plan['selector'] and
+                len(plan['prefix'])==len(plan['baseline_prefix'])==plan['group_position'],
+                'invalid target prefix')
 
     def observe(self, event):
         require(self.selected_seq is None,'repeated target decision')
         descriptor=candidate_descriptor(event)
+        self.geometry_change=None
         require(type(event['seq']) is int and event['seq']>self.last_seq,'decision sequence not increasing')
         self.last_seq=event['seq']
         self.last_observed=(self.last_observed+[dict(descriptor,seq=event['seq'])])[-8:]
         if target_group(descriptor)!=self.group:return False
         expected=self.plan['prefix'][self.seen]
-        require(descriptor==expected,'required target group prefix changed')
+        require(target_selector(descriptor)==expected,'required target group prefix changed')
+        baseline=self.plan['baseline_prefix'][self.seen]
+        if descriptor['offset']!=baseline['offset']:
+            self.geometry_change={'group_position':self.seen+1,'baseline':baseline,
+                                  'observed':dict(descriptor,seq=event['seq'])}
         self.seen+=1
         if self.seen!=len(self.plan['prefix']):return False
         self.selected_seq=event['seq']
+        self.selected_descriptor=descriptor
         return True
 
     def require_reached(self, hit):
@@ -606,6 +654,8 @@ class TargetMatcher:
     def diagnostics(self):
         return {'planned':target_summary(self.plan),'observed_group_prefix_count':self.seen,
                 'last_observed':self.last_observed,'selected_seq':self.selected_seq,
+                'selected_observed':dict(self.selected_descriptor,seq=self.selected_seq) if self.selected_descriptor else None,
+                'last_geometry_change':self.geometry_change,
                 'trace_verified_before_decision':self.trace_verified,
                 'decision_sent':self.decision_sent,'acknowledged_before_fault':self.ack_before_fault}
 
@@ -624,6 +674,12 @@ def verify_pending_trace(trace, event):
 
 def decide_io(stream, trace, matcher, event, acknowledgements):
     inject=matcher.observe(event)  # Any mismatch raises BEFORE a command is sent.
+    if matcher.geometry_change is not None:
+        # Safe metadata for every changed prefix member, before any reply. This
+        # is a selector match, not proof of private-trace verification/injection.
+        log(kind='target-geometry',identity_policy=TARGET_POLICY,
+            target_baseline_seq=matcher.plan['baseline_seq'],
+            stage='selector-match-before-trace-verification',**matcher.geometry_change)
     if inject:
         verify_pending_trace(trace,event)
         matcher.trace_verified=True
@@ -785,7 +841,7 @@ def execute(worker, root, case, request, initial, target=None, fault='none', sec
                 if hit:
                     require(hit['seq'] in all_events, 'target missing from trace')
                     chosen=all_events[hit['seq']]
-                    require(event_descriptor(chosen)==target['descriptor'],'verified target trace changed')
+                    require(event_descriptor(chosen)==matcher.selected_descriptor,'verified target trace changed')
                     require(chosen['op'] in ('write','sync','truncate'), 'fault outside approved operation')
                 model=Model(initial)
                 for event in events: model.consume(event)
@@ -1299,14 +1355,14 @@ def main():
             targets=select_targets(base['events'],op)
             acceptance.plan(op,sector,targets)
             log(kind='schedule',operation=op,sector=sector,
-                selection='discovery first-middle-last; descriptor and ordered group prefix checked before injection; no substitution',
+                selection='discovery first-middle-last; stable selector/shape and ordered group prefix before injection; exact live private trace; no substitution',
                 targets=[target_summary(p) for _,p in targets])
             for key,target in targets:
                 for fault in fault_modes(target):
                     case=f'{op}-s{sector}-b{target["baseline_seq"]}-{fault}'
                     got=execute(worker,root,case,request,seedimage,target,fault,sector)
                     reached=got['all'][got['target_seq']]
-                    require(event_descriptor(reached)==target['descriptor'],'fault schedule target drift')
+                    evidence=target_evidence(target,reached)
                     schedules=RECOVERY_SCHEDULES
                     results=[]
                     for schedule,seed in schedules:
@@ -1317,7 +1373,7 @@ def main():
                         replay(worker,root,p,seedstate,request,got['ack'],schema)
                         item={'schedule':schedule,'seed':seed,'outcome':outcome,'image_sha256':digest(encoded({n:digest(b) for n,b in image.items()})),'state_sha256':digest(encoded(state))}
                         results.append(item);recoveries+=1;remove_owned(root,p)
-                    report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],'planned':target_summary(target),'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
+                    report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],**evidence,'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
                     acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
                     log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],key[2],fault))
     acceptance.require_complete()
