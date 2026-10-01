@@ -9,21 +9,23 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
-Latest executed R3 evidence: [seventh dedicated job](#seventh-dedicated-job--geometry-case-passes-stable-prefix-mismatch-stops-matrix).
-All 41 targeting tests, 16 fixture tests, nine wrapper checks and prerequisites
-passed. One changed-WAL-geometry case completed. The matrix failed on a later
-stable-prefix check after 399 cases / 1,995 recoveries. T18 PARTIAL, T30 BLOCKED,
-D6/R3 OPEN; all seven slots consumed. Earlier source-review/run records below
-retain their historical checkpoint status.
+Latest executed R3 evidence: [eighth dedicated job](#eighth-dedicated-job--prerequisites-pass-bounded-matrix-times-out).
+The reviewed `627e4c0` source passed all 26 classifier, 52 targeting and 16 fixture
+tests, nine wrapper checks, prerequisites, five negative controls and both genuine
+M1 fixtures. The bounded acceptance invocation timed out after 1,560 completed
+cases / 7,800 recoveries. Explicit checkpoint completed for both sector models;
+automatic checkpoint remains partial. Newly acknowledged effects survived all
+7,025 recoveries in the 1,405 completed cases with a pre-fault acknowledgement,
+but required acknowledgement boundaries and later families are still missing.
+**T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING. All eight dedicated
+slots are consumed; additional execution slots ZERO.**
 
-Previous source-only proposal: [target grouping v3](#target-grouping-v3--source-review-only).
-Its 52 prepared targeting tests and all runtime behavior are **NOT RUN** at this
-revision. Historical passing tests above apply to the seventh run's source only.
-
-Latest source-only correction: [WAL format classifier](#wal-format-classifier--source-review-only).
-Its 26 new classifier tests and 52 updated targeting tests are **NOT RUN**.
-Historical semantic labels affected by the old classifier require re-evaluation;
-raw fault/recovery observations do not establish semantic commit boundaries.
+The earlier source-only [grouping v3](#target-grouping-v3--source-review-only) and
+[WAL classifier](#wal-format-classifier--source-review-only) records retain their
+historical NOT RUN status at publication. Their tests were subsequently executed
+only at the exact eighth-job source below. Historical fifth/sixth/seventh cases
+are not included in this candidate's completeness accounting. The old classifier's
+semantic labels still require re-evaluation; no historical relabelling occurred.
 
 ## Execution boundary
 
@@ -140,7 +142,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T15 | PASS | `TestM2ImmutableSQLHistory`, `TestM2HTTPContractAndSafety` (G/R): UPDATE/DELETE/REPLACE/upsert guards, immutable revision field, GET-only routes/405, absent audit API, unchanged state after reopen. | None. |
 | T16 | PASS | `TestM2LinkageGuards`, `TestM2ImmutableSQLHistory` (G/R): missing references/events, wrong pair/ID, duplicate event, invalid base/source/actor/range, head mismatch including null, deletion/replacement, deferred commit rejection. | None within the approved application/guard boundary; privileged schema editing is outside it. |
 | T17 | PASS | `TestM2ControlledActionClock` (F/G/R): approved restore action and event time/actor linkage under all three clocks; `TestM2HTTPContractAndSafety`, `TestM2PreconditionsAttributionAndFingerprints`, `TestM2NoopKindsAndFullRestore`, `TestM2SnapshotsRestoreAndReplay`, existing privacy tests (G/R/B): explicit actor, spoof rejection, event actions/minimal columns and no payload leakage. | Attribution remains development/test, never authentication. |
-| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | Fifth-, sixth- and seventh-job WAL write/sync fault cases passed for create/data/metadata/archive/unarchive, with no-op partial; restore and full required boundary coverage remain missing. T18 is not closed by this partial matrix or SQL-only errors. |
+| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | Fifth-, sixth- and seventh-job mutation cases remain historical partial evidence. The eighth job adds completed checkpoint and partial automatic-checkpoint faults only; required mutation/restore F7 storage/sync coverage is still incomplete. No historical cases fill the eighth candidate's missing matrix. |
 | T19 | PASS | `TestM2RevisionPagination`, `TestM2HTTPContractAndSafety` (G/R): 205+ revisions, limits default/1/100, changed limit, append and restore between pages, fixed end, invalid cursors/queries/numbers, missing/empty, unchanged reads. | None. |
 | T20 | PASS | `TestM2MigrationInterruptionAndRetry`, existing fresh/M0 migration tests (G/R/B): fresh/M0/empty M1 and M1 metadata/keys without records; ledger retained, no invented adoption. New record creation is exercised on fresh and upgraded stores. | None. |
 | T21 | PASS | `TestM2AdoptionAndLegacyReplay` (G/R), B with actual M1 binary: active/archived records, multiple M1 edits/replays, verbatim current bytes/times, one adoption each, explicit boundary. | None. |
@@ -152,7 +154,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Seventh job: 41 targeting tests, 16 fixture tests, nine wrapper checks, prerequisites, five negative controls and both real M1 fixtures PASS; 399 cases / 1,995 recoveries before `noop-s512-b44-full` failed its pre-injection stable-prefix check. One changed-geometry case completed. Earlier runs remain separate historical evidence. | No-op incomplete; restore, migration, fresh/empty initialization, checkpoint/WAL reset/truncate and new acknowledged-effect fault survival remain unexecuted. All seven slots consumed. See detailed evidence below. |
+| T30 | BLOCKED | Eighth job: 26 classifier + 52 targeting + 16 fixture tests, nine wrappers, prerequisites, five negative controls and genuine M1 fixtures PASS. Bounded invocation timed out after 1,560 cases / 7,800 recoveries; explicit checkpoint complete in both sectors; 1,405 cases establish pre-fault acknowledged-effect survival. | Automatic checkpoint incomplete; later ten operation families unexecuted for this source; five required post-acknowledgement boundaries missing. All eight slots consumed. See the eighth-job reconciliation below; no final acceptance PASS. |
 
 ## Failure points and observation
 
@@ -1624,3 +1626,236 @@ bounded subsets of WAL fault cases passed; remaining storage/power-loss coverage
 is incomplete.
 This gap is not waived or represented as application acceptance.
 The draft PR is not a request to merge.
+
+## Eighth dedicated job — prerequisites pass; bounded matrix times out
+
+**Executed 2026-10-01. Prerequisite harness validation PASS; bounded application
+matrix INCOMPLETE / job FAIL (timeout). T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN;
+M2 acceptance PENDING; PR #6 DRAFT; additional execution slots ZERO.**
+
+- [Run 36896062479](https://github.com/estul26/Contextarium/actions/runs/36896062479),
+  [job 110483242949](https://github.com/estul26/Contextarium/actions/runs/36896062479/job/110483242949),
+  push event, attempt 1, one dedicated job: **55m 58s**, 16:59:33–17:55:31 UTC.
+- Tested harness/controller/tests: `627e4c0fc392410910ec71ed7d522d1a7e27eefe`.
+- Unchanged application: `b6f63a7564977555faffe6f9ca6b1a9c22910d43`.
+- Genuine M1 source: `14dc96ad18810202f63d5ac590822f117a787e82`.
+- Workflow commit: `1834d51e356a12674d178ae9c2cdc008c6343675`, separately recorded
+  from the checked-out harness. Only `.github/workflows/r3-eighth-once.yml` was
+  added for this authorization; prior workflows and ordinary CI were unchanged.
+- The 60-minute job used one acceptance invocation with a 3,300-second process
+  bound, leaving reporting time. At 17:55:22 UTC the bounded command ended with
+  exit **137**, exactly 55 minutes after its step began. The reporting step passed.
+  No repair, rerun, replacement, second acceptance invocation or local harness
+  execution followed. This is a time-bound exhaustion, not evidence of a failed
+  durability invariant in a completed case.
+
+The workflow checks the repository is public, the runner is standard GitHub-hosted
+Linux, the exact predecessor/branch/commit message, attempt 1 and a single workflow
+run. Its path filter excludes reporting pushes and it has no dispatch trigger.
+The final API census contains one run, attempt 1, and zero artifacts. Previous
+allowances remain consumed; the original false gate remains unchanged.
+
+### Executed gates and commands
+
+Each command below executed once, in order, without skipped, expected-failure or
+unexpected-success test cases. The temporary C bridge built and loaded successfully
+against the reviewed `wal_geometry.h`; the classifier suite was not Python-only.
+
+| Gate | Actual result |
+| --- | --- |
+| C compiler availability | PASS; `cc` and `gcc` available, GCC 13.3.0 |
+| `python3 scripts/test_r3_wal_classifier.py -v` | PASS: `Ran 26 tests in 1.663s`; `OK` |
+| `python3 scripts/test_r3_targeting.py -v` | PASS: `Ran 52 tests in 1.252s`; `OK` |
+| `python3 scripts/test_r3_fixture.py -v` | PASS: `Ran 16 tests in 0.357s`; `OK` |
+| Nine rejection-wrapper checks | PASS, 9/9: exact assertion; different assertion; no rejection; worker assertion; timeout; worker exit; malformed data; missing field; failed lookup |
+| Source/dependency/build checks | PASS: clean exact checkout, production-source equality, formatting, `go mod download`, `go mod verify`, tagged vet and worker build; genuine M1 build from its pinned archive |
+| Independent storage model | PASS: visibility, successful/failed sync, truncate, namespace and deterministic reconstruction |
+| Real intercepted VFS checks | PASS: visibility/read/write/sync/truncate/create/delete and reached failed-sync probe |
+| Native/instrumented application controls | PASS: actual mutation, positive consistency oracle and replay controls |
+| Five exact-reason negative controls | PASS; reasons below |
+| Genuine populated and empty M1 fixtures | PASS: applicable HTTP preparation, controller-requested graceful SIGTERM, exit 0, clean-close/WAL postconditions; no cleanup errors |
+
+The **94 test methods** and nine wrapper checks are harness-validation evidence,
+not simulated application durability results. The acceptance command was exactly:
+
+```sh
+python3 scripts/r3-check.py --mode acceptance --worker "$R3_BUILD/worker" --m1-binary "$R3_BUILD/m1-binary"
+```
+
+This single entry performed the prerequisites and real fixtures before beginning
+the matrix. Positive oracle inputs remained unchanged. Negative controls rejected
+only for their expected reasons:
+
+| Negative control | Recorded rejection |
+| --- | --- |
+| incorrect-sync-semantics | `successful sync persistence` |
+| lost-acknowledged-mutation | `acknowledged mutation lost/changed` |
+| broken-audit-linkage | `event/revision pair` |
+| broken-revision-linkage | `head/snapshot mismatch` |
+| broken-idempotency-linkage | `idempotency revision absent` |
+
+### Reconciled application coverage
+
+An independent reader of the downloaded job log (without importing/executing the
+harness) checked each completed case against its announced plan: unique identity,
+all selector fields, validated page size, permitted positive-WAL offset geometry,
+exact live sequence/descriptor, compatible fault mode and first/middle/last labels.
+Every counted case records all five recoveries, state/image hashes and replay
+success. Counts and the canonical case hash match the runner's retained manifest.
+The complete 10,179,133-byte controller stream also matches its hash; zero malformed
+records were reported. Private trace bytes are no longer available for independent
+reclassification; their hashes bind the runtime verification records. There is no controller `FINAL` record because of the kill.
+A complete retained stream does not mean a complete acceptance matrix.
+
+| Family | Sector | Completed / announced cases | cut-before | cut-after | IOERR | FULL | partial write | Recoveries |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Explicit checkpoint | 512 | 345 / 345 | 71 | 71 | 71 | 67 | 65 | 1,725 |
+| Explicit checkpoint | 4096 | 345 / 345 | 71 | 71 | 71 | 67 | 65 | 1,725 |
+| Automatic checkpoint | 512 | 870 / 7,843 | 175 | 175 | 174 | 173 | 173 | 4,350 |
+| Automatic checkpoint | 4096 | NOT RUN / not discovered | 0 | 0 | 0 | 0 | 0 | 0 |
+| Restore, migration/adoption, fresh initialization, empty-M1 initialization, no-op, create, data PATCH, metadata PATCH, archive, unarchive | Both | NOT RUN / not discovered | 0 | 0 | 0 | 0 | 0 | 0 |
+| **Total completed** | | **1,560** | **317** | **317** | **316** | **307** | **303** | **7,800** |
+
+For every completed case, schedules were exactly `discard/17`, `retain/17`,
+`reorder-torn/17`, `reorder-torn/29`, `reorder-torn/101`: **1,560 recoveries per
+schedule**. Outcomes were 7,141 wholly present and 659 wholly absent; no partial
+cross-store outcome passed. Required consistency includes integrity/FKs, schema
+and subject retention, migration ledger, records/revisions/audit/idempotency,
+contiguous heads/snapshots, exact JSON tokens/schema pair, prior durable history
+and same-key replay in fresh processes. There are 6,973 uncompleted combinations
+in the already announced automatic-checkpoint plan, plus undiscovered families.
+The reviewed checkpoint-first order, compatible modes and completeness guard
+were unchanged; historical cases are not counted toward these totals.
+
+Reached operations: WAL writes 330, WAL syncs 21, database writes 1,187,
+database syncs 6, database truncates 8 and WAL truncates 8. Format-derived WAL
+write labels were: header reset 15, non-commit frame header 40, complete
+commit-marker header 25, page data 240 and partial frame header 10. The ten partial
+headers remain **raw write-fault coverage**, not complete commit markers. No
+unknown or unsupported write was relabelled to satisfy semantic coverage. The
+actual database page size was 4096 in both device-sector models. A complete marker
+header label alone establishes neither durable commit nor client acknowledgement.
+Earlier runs' old-classifier semantic labels remain qualified and unchanged.
+
+**New acknowledged effects:** 1,405 completed cases had complete successful
+mutation responses in the independent ledger before injection (284 per explicit
+checkpoint sector; 837 automatic-checkpoint/512). All **7,025** corresponding
+recoveries retained their acknowledged effects and passed replay without duplicate
+effects. The recorded pre-fault count ranged from 1 to 19 per case; these are
+repeated disposable scenarios, not a claim of that many unique production effects.
+The unchanged controller writes, flushes and fsyncs the ledger before exposing an
+acknowledgement to the fault decision. All 155 other completed cases had zero
+acknowledgements and were allowed wholly present/absent outcomes.
+
+The required post-ack database write/sync and WAL truncate checks completed for
+explicit checkpoint in both sectors. Automatic checkpoint/512 covered acknowledged
+database writes but still lacks acknowledged database sync and WAL-header-reset
+coverage. Automatic checkpoint/4096 lacks all three required categories. Those
+**five missing acknowledgement categories** prevent final acceptance independently
+of the missing operation families. Model successful-sync guarantees were unchanged.
+
+### Timeout evidence and limits
+
+Last completed case: `autocheckpoint-s512-b2262-cut-after`. The next in-flight
+case was `autocheckpoint-s512-b2262-ioerr`; its last public settings query completed
+`max_open_connections=1`. Its plan targeted `autocheckpoint/store.db/database/write`,
+meaning `write`, exact offset **688128**, length **4096**, flags **0**, WAL context
+**0**, N=1 of 1, baseline sequence **2262**, labels first/middle/last. There is no
+completed injection/recovery result for that case; it is not included in counts.
+
+The last retained private-trace metadata is only `stage=post`, sequence **5162**,
+`rc=0`, `applied=3776`. This post row lacks the operation, offset, page context and
+selector fields needed to bind it to the planned target. It is not proof that the
+planned IOERR was or was not injected. No controller exception/worker-failure or
+cleanup-error diagnostic survived the hard timeout; natural child exit, exact
+in-flight stage, pre-injection verification/reached flags and partial recovery
+progress are unestablished. The log retains file hashes/sizes, not the private
+trace/ledger/stderr contents. Do not invent a mismatch, failed SQLite invariant,
+missing stderr chain or exact slow stage from this limited evidence.
+
+The 55-minute command bound expired before the reviewed matrix could complete.
+The partial automatic-checkpoint plan alone announces 7,843 cases for sector 512;
+its remaining work was not skipped, narrowed or retried. Timing evidence does not
+establish an application defect. Closing T18/T30 still requires the missing
+mutation/restore, migration/initialization, automatic-checkpoint/reset and full
+acknowledged-effect evidence under a separately reviewed and authorized execution.
+No additional execution is authorized by this report.
+
+### Fidelity, manifests, resource and retention evidence
+
+Standard GitHub-hosted `ubuntu-24.04`, image `20260927.320.1`, x86_64,
+4 logical CPUs, `MemTotal: 16373452 kB`, kernel `6.17.0-1022-azure`,
+Go `1.26.8`, GCC `13.3.0`. Application-source equality was verified before building.
+Modules were downloaded before resolving the bundled header; no system SQLite was
+selected. go-sqlite3 is `v1.14.52`; actual SQLite is `3.53.4`, source ID
+`2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc`.
+
+Observed settings: foreign_keys=1, journal_mode=wal, synchronous=2/FULL,
+busy_timeout=1000, max_open_connections=1, page_size=4096, wal_autocheckpoint=1000.
+`mmap_size` was explicitly unsupported (`vfs-control-notfound-no-row`); each
+executed family/sector baseline passed the no-mmap bypass checks. Compile options
+were logged through the existing allowlist; three entries were redacted, so the
+public list is not an unredacted compiler-options transcript.
+
+| Source/binary | SHA-256 from the executed build manifest |
+| --- | --- |
+| `go.mod` | `c7023abb4aec085d90899acecd2a4c2cbe4bc9081d781ad9f64a897ca9d236a1` |
+| `go.sum` | `1de26858cca5c22e551d270f2788c128530c149e3f2a321d80902480831a9ca2` |
+| `internal/r3/vfs/vfs.c` | `8d8e6964bb24b5464f73dd3b94a1bf5e2938ebaeeefda1c803d148ab2e983a61` |
+| `internal/r3/vfs/vfs.go` | `4ee3d9df8c5dedc0dde712c8f206615a84c6222cbae2f368dae4b59f03eb15dc` |
+| `internal/r3/vfs/wal_geometry.h` | `b9c4c78fd70a3e71245907c011944b30c60249d1989e988b563eac495e7dbf8a` |
+| `internal/r3/worker/main.go` | `1f3943bb36af9071d3d52dd9028e174973a49dceda5f836e74cc05617db128d5` |
+| `m1-binary` | `25c0afbdf927c39bceff7558a295d82baa2cf63760f1f846b9d681d5b38345c0` |
+| `m1/go.mod` | `c7023abb4aec085d90899acecd2a4c2cbe4bc9081d781ad9f64a897ca9d236a1` |
+| `m1/go.sum` | `1de26858cca5c22e551d270f2788c128530c149e3f2a321d80902480831a9ca2` |
+| `scripts/r3-check.py` | `deab5ec4d2a1d2941779baf1af0a23dcf4dc78ebd0098619b881d26b187561c9` |
+| `scripts/r3_wal_test_vectors.py` | `0e8330960d6523d271d6508c00982d71a33b1e0edc0fd576bd776697c202aeb4` |
+| `scripts/test_r3_fixture.py` | `4326a6930d06467ed3a7a0d41037e1c6c45bfcaa103e5f2c46181fdb0d5ea433` |
+| `scripts/test_r3_targeting.py` | `928b0f2a61b91ad6e29b2c459cf9b5209ee43800b5919682fd8dd09360687b0d` |
+| `scripts/test_r3_wal_classifier.py` | `cf14904dad3e370d49a07a058f697e1fb58f28c2fbb3e139ed61566716c9cdf9` |
+| `sqlite3-binding.c` | `eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00` |
+| `sqlite3-binding.h` | `4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f` |
+| `worker` | `decd353da3a4df50af7e0d3746dce69ca9787eee190d7a76263cef281849f020` |
+
+Retained manifests (SHA-256):
+
+| Evidence | Bytes | SHA-256 |
+| --- | ---: | --- |
+| controller JSONL | 10,179,133 | `61ad3a68e90fd1d16c1f33e05b7bad1f8a48d133e34082c27c237f1142e15108` |
+| Canonical completed-case manifest | — | `88ead355d3d4f4e68a67e3a730d38e11fcd4b811157a61997bcd6a4b277cd12d` |
+| `classifier-tests.log` | 3,855 | `7d93dd82277c2c166e50bee752755a0735db13aa619b3a2da61080ffa5d333fb` |
+| `targeting-tests.log` | 7,287 | `cd0a35c241d81d93ceae98b292ab52d3b872421589c8f1d80baf0d80fba9a233` |
+| `fixture-tests.log` | 2,153 | `1cc7774c93e98e35d1c5fe66c8c23401338ad0e33d574d759227ea6ddf20e9ed` |
+| `wrapper-results.json` | 633 | `4d96fb05b495895e539fc9a59ad3ca5589ba358eca5c6523b41b100e97c0810d` |
+| `trace.jsonl` | 25,969,427 | `7fc446995397019ba63475e19c16e2c5eef8c507cf85a8cdda64a654f6186e45` |
+| `acks.jsonl` | 3,880,356 | `17e94da4392223bdb2412906f4a9e5d61b4aca5724caf28ef7f03a397c724e78` |
+| `worker-stderr.txt` | 1,107,073 | `8f956cf682d01cbb723c4a4a3cbbb87f614976171e6f46e5e33f9d53342fbbdc` |
+
+The job logs additionally retain each case's planned/live descriptor, trace and
+ledger hashes, schedule/seed, recovered image/state hashes, sanitized unit-test
+summaries, fixture close records and source/build manifests. No artifact or cache
+uploads were configured in the R3 job; the artifact API returned zero. Private
+page traces, raw worker output, database images and ledgers remained on the
+marked disposable runner and were not retained after runner disposal. Local
+report reconciliation used the downloaded public job logs only.
+
+Modeled scratch cap: 4,294,967,296 bytes; free-space reserve: 2,147,483,648 bytes.
+Observed free space before acceptance: **92,207,206,400 bytes**; after:
+**92,149,215,232 bytes**. Remaining marked scratch: **40,136,603 bytes**. The reviewed
+controller sampled its cap/reserve checks at case entry; no resource-bound error
+was reported. Continuous peak usage was **not measured**, so endpoint observations
+must not be presented as a measured high-water mark or an OS-enforced quota.
+Only synthetic/test-owned runner paths and processes were used. No real disk
+filling, host reboot, personal databases, production fault switches or paid
+services were used. Paid usage for this standard public-runner job is **$0** under
+[GitHub's public-repository runner policy](https://docs.github.com/en/billing/concepts/product-billing/github-actions);
+no billing was enabled or purchased. Ordinary PR CI remained separate and passed
+at the workflow candidate ([36896068963](https://github.com/estul26/Contextarium/actions/runs/36896068963));
+it is not R3 evidence.
+
+Workflow publication checks were YAML parsing, Bash syntax, embedded Python AST
+parsing, scope/privacy review and whitespace checks. No reviewed harness source,
+application code, migrations, dependencies, model/oracle/replay semantics, D1–D5,
+previous workflow gate or ordinary CI behavior was changed. The original dirty
+patch and unrelated worktrees/artifacts were preserved. Architecture deviations:
+**NONE**. Evidence publication does not grant owner acceptance or merge readiness.
