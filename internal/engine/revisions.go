@@ -113,7 +113,7 @@ func (s *Service) CreateRecord(ctx context.Context, key string, body []byte) (Mu
 		if err != nil {
 			return nil, err
 		}
-		r.CreatedAt = now()
+		r.CreatedAt = s.actionTime()
 		r.UpdatedAt = r.CreatedAt
 		return s.writeRevision(ctx, tx, r, Record{}, "create", nil, a)
 	})
@@ -235,7 +235,7 @@ func (s *Service) writeRevision(ctx context.Context, tx *sql.Tx, r, old Record, 
 	var base *int64
 	if old.Revision != 0 {
 		base = &old.Revision
-		r.UpdatedAt = now()
+		r.UpdatedAt = s.actionTime()
 	}
 	event, err := NewID("evt")
 	if err != nil {
@@ -279,7 +279,7 @@ func (s *Service) writeRevision(ctx context.Context, tx *sql.Tx, r, old Record, 
 	case operation == "create":
 		action = "record.created"
 	case operation == "restore":
-		action = "record.revision.restored"
+		action = "revision.restored"
 	case old.Status != r.Status && r.Status == "archived":
 		action = "record.archived"
 	case old.Status != r.Status && r.Status == "active":

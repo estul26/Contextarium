@@ -413,3 +413,52 @@ func TestM2UpgradeCommitConstraintRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestM2ReviewedCandidateChecksumRefusal(t *testing.T) {
+	db, path := m1DB(t)
+	seedM1(t, db)
+	// Prepare a NEW disposable database using the reviewed candidate's exact 003
+	// bytes. No existing database or migration ledger is edited to manufacture it.
+	previous := append([]migration(nil), migrations...)
+	previous[2].sql = strings.ReplaceAll(previous[2].sql, "'revision.restored'", "'record.revision.restored'")
+	if migrationChecksum(previous[2]) != "31865ddf5b43c6d64b741d8be40c46da191fd01d77681b88c4aecf9ebbae01cf" {
+		t.Fatal("fixture does not match reviewed candidate")
+	}
+	if err := migrate(context.Background(), db, previous); err != nil {
+		t.Fatal(err)
+	}
+	var ledger, history string
+	if err := db.QueryRow("SELECT group_concat(version||name||checksum||applied_at) FROM schema_migrations").Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT group_concat(record_id||data||recorded_at||audit_event_id) FROM record_revisions").Scan(&history); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rejected, err := Open(context.Background(), path)
+	if rejected != nil {
+		rejected.Close()
+		t.Fatal("incompatible database returned")
+	}
+	if !errors.Is(err, ErrIncompatibleSchema) {
+		t.Fatal("old candidate 003 checksum silently accepted", err)
+	}
+	// Read the test-owned file only to prove refusal retained the old ledger/history.
+	db, err = openDatabase(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var gotLedger, gotHistory string
+	if err := db.QueryRow("SELECT group_concat(version||name||checksum||applied_at) FROM schema_migrations").Scan(&gotLedger); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT group_concat(record_id||data||recorded_at||audit_event_id) FROM record_revisions").Scan(&gotHistory); err != nil {
+		t.Fatal(err)
+	}
+	if gotLedger != ledger || gotHistory != history {
+		t.Fatal("refusal rewrote existing candidate state")
+	}
+}

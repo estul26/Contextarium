@@ -7,12 +7,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 type Service struct {
 	db *sql.DB
 	// Internal transaction barriers are configured only by package tests; never by HTTP.
 	fault func(string) error
+	// The record action clock is internal; callers cannot set it through HTTP.
+	clock func() time.Time
 }
 
 func (s *Service) checkpoint(point string) error {
@@ -29,7 +32,9 @@ type MutationResult struct {
 
 func (r MutationResult) MarshalJSON() ([]byte, error) { return r.Data, nil }
 
-func New(db *sql.DB) *Service { return &Service{db: db} }
+func New(db *sql.DB) *Service { return &Service{db: db, clock: time.Now} }
+
+func (s *Service) actionTime() string { return s.clock().UTC().Format(time.RFC3339Nano) }
 
 // Every mutation, including replay bookkeeping, uses the storage pool's
 // BEGIN IMMEDIATE transaction. No domain mutation is owned by the HTTP adapter.

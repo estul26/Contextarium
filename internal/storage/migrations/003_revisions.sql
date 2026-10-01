@@ -43,7 +43,7 @@ CREATE TABLE mutation_audit (
     timestamp TEXT NOT NULL,
     actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 64 AND substr(actor_id,1,1) GLOB '[a-z]' AND actor_id NOT GLOB '*[^a-z0-9_-]*'),
     attribution_kind TEXT NOT NULL CHECK (attribution_kind='development_test'),
-    action TEXT NOT NULL CHECK (action IN ('record.created','record.updated','record.archived','record.unarchived','record.revision.restored','record.history_adopted')),
+    action TEXT NOT NULL CHECK (action IN ('record.created','record.updated','record.archived','record.unarchived','revision.restored','record.history_adopted')),
     resource_type TEXT NOT NULL CHECK (resource_type='record'),
     resource_id TEXT NOT NULL,
     subject_id TEXT NOT NULL REFERENCES subjects(id),
@@ -87,7 +87,7 @@ CREATE TRIGGER audit_matches_revision BEFORE INSERT ON mutation_audit
 WHEN NOT EXISTS(SELECT 1 FROM record_revisions v WHERE v.audit_event_id=NEW.event_id AND v.record_id=NEW.resource_id AND v.revision_number=NEW.revision_number
  AND v.recorded_at IS NEW.timestamp AND v.actor_id IS NEW.actor_id AND v.attribution_kind IS NEW.attribution_kind AND v.request_id IS NEW.request_id
  AND v.subject_id IS NEW.subject_id AND v.namespace IS NEW.namespace AND v.base_revision IS NEW.base_revision AND v.source_revision IS NEW.source_revision
- AND CASE v.operation WHEN 'create' THEN NEW.action='record.created' WHEN 'm1_adoption' THEN NEW.action='record.history_adopted' WHEN 'restore' THEN NEW.action='record.revision.restored'
+ AND CASE v.operation WHEN 'create' THEN NEW.action='record.created' WHEN 'm1_adoption' THEN NEW.action='record.history_adopted' WHEN 'restore' THEN NEW.action='revision.restored'
  ELSE NEW.action=CASE WHEN v.status='archived' AND (SELECT status FROM record_revisions WHERE record_id=v.record_id AND revision_number=v.base_revision)='active' THEN 'record.archived'
  WHEN v.status='active' AND (SELECT status FROM record_revisions WHERE record_id=v.record_id AND revision_number=v.base_revision)='archived' THEN 'record.unarchived' ELSE 'record.updated' END END)
 BEGIN SELECT RAISE(ABORT,'audit revision mismatch'); END;

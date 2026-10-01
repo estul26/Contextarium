@@ -78,6 +78,23 @@ a separately preserved closed M1 copy; preserve the M2 file independently and
 explicitly account for later M2 changes omitted by that rollback. Never copy only
 a live main database while its WAL contains state.
 
+### Reviewed-candidate 003 checksum change
+
+The PR #6 correction aligns restore audit events with the approved
+`revision.restored`. Because 003 is still unmerged, its constraint and trigger were
+corrected in place; 001/002 are unchanged. The reviewed implementation
+`3da25a78e5100d58fb75b196bc91a85e606f0b78` used 003 checksum
+`31865ddf5b43c6d64b741d8be40c46da191fd01d77681b88c4aecf9ebbae01cf`;
+the corrected checksum is
+`9e6bfd1718cdaeaed92b7ac028bb90894d4a1ca3467d7ca02e6ba8460dbb5b9d`.
+
+A disposable database created/adopted by that reviewed candidate is incompatible
+with this binary and will be refused before listening. Preserve it unchanged; do
+not edit its migration ledger, overwrite it, or assume it upgrades automatically.
+Use a fresh disposable database or a separately prepared closed M1 fixture.
+Retain old candidate evidence separately. This correction provides no old-003
+conversion and does not change M1 adoption or legacy replay policy.
+
 ## Validation
 
 ```sh
@@ -99,8 +116,14 @@ and a candidate binary; all database paths are created by the script:
 python3 scripts/m2-binary-check.py \
   --binary ./bin/contextarium \
   --m1-binary ./test-artifacts/m1-contextarium \
-  --m0-binary ./test-artifacts/m0-contextarium
+  --m0-binary ./test-artifacts/m0-contextarium \
+  --reviewed-m2-binary ./test-artifacts/reviewed-m2-contextarium
 ```
+
+The optional `--reviewed-m2-binary` must be built from
+`3da25a78e5100d58fb75b196bc91a85e606f0b78`. It creates a separate disposable
+old-003 fixture and checks that the corrected candidate refuses it without
+rewriting the ledger or mutation stores. It never uses an existing candidate DB.
 
 R1 graceful SIGTERM/drain, R2 abrupt test-child termination, and R3 simulated
 storage/power loss are distinct. Passing these commands establishes no R3 result.

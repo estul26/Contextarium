@@ -105,6 +105,8 @@ def copy_closed(source, destination):
 
 def refuse(binary, database):
     before = stores(database)
+    with contextlib.closing(sqlite3.connect(database)) as db:
+        ledger = db.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
     port = free_port()
     env = dict(os.environ, CONTEXTARIUM_LISTEN_ADDR=f"127.0.0.1:{port}", CONTEXTARIUM_DB_PATH=str(database))
     result = subprocess.run([str(binary)], env=env, capture_output=True, timeout=12)
@@ -112,12 +114,14 @@ def refuse(binary, database):
     logs = (result.stdout + result.stderr).decode()
     assert "application ready" not in logs
     assert_private(logs, database)
-    assert stores(database) == before, "old binary modified M2 stores"
+    assert stores(database) == before, "refusing binary modified M2 stores"
+    with contextlib.closing(sqlite3.connect(database)) as db:
+        assert db.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall() == ledger
     with socket.socket() as sock:
-        assert sock.connect_ex(("127.0.0.1", port)) != 0, "old binary opened listener"
+        assert sock.connect_ex(("127.0.0.1", port)) != 0, "refusing binary opened listener"
 
 
-def check(binary, m1, m0):
+def check(binary, m1, m0, reviewed_m2=None):
     with tempfile.TemporaryDirectory(prefix="contextarium-m2-binary-") as directory:
         root = Path(directory)
         database = root / "synthetic.db"
@@ -207,6 +211,22 @@ def check(binary, m1, m0):
             assert request(port, "GET", path)[1]["data"] == adopted["data"]
             assert request(port, "GET", fresh_path)[0] == 404  # Later M2 changes are omitted.
         assert stores(evidence) == before  # M2 evidence is preserved independently.
+        if reviewed_m2 is not None:
+            # Create a separate disposable database with the reviewed candidate.
+            # Never edit a ledger or point either binary at existing user data.
+            previous = root / "reviewed-candidate.db"
+            with running(reviewed_m2, previous) as port:
+                old_sub = mutation(port, "POST", "/api/v1/subjects", subject_body, "subject", 201)
+                mutation(port, "POST", "/api/v1/schemas", schema_body, "schema", 201)
+                old_body = body.replace(subject["data"]["id"], old_sub["data"]["id"])
+                old_record = mutation(port, "POST", "/api/v1/records", old_body, "create", 201)
+                old_path = "/api/v1/records/" + old_record["data"]["id"]
+                mutation(port, "POST", old_path + "/restore/1", '{"base_revision":1}', "restore", 200)
+            with contextlib.closing(sqlite3.connect(previous)) as db:
+                assert db.execute("SELECT checksum FROM schema_migrations WHERE version=3").fetchone() == ("31865ddf5b43c6d64b741d8be40c46da191fd01d77681b88c4aecf9ebbae01cf",)
+                assert db.execute("SELECT action FROM mutation_audit WHERE revision_number=2").fetchone() == ("record.revision.restored",)
+            refuse(binary, previous)
+            print("PASS: reviewed-candidate 003 checksum refused before listening; original ledger and all mutation stores retained.")
         # Fresh startup remains functional; unsafe binding fails before creating a DB.
         with running(binary, root / "fresh.db") as port:
             assert request(port, "GET", "/api/v1/records")[1]["data"] == []
@@ -221,5 +241,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("binary", "m1-binary", "m0-binary"):
         parser.add_argument("--" + name, type=lambda value: Path(value).resolve(), required=True)
+    parser.add_argument("--reviewed-m2-binary", type=lambda value: Path(value).resolve())
     args = parser.parse_args()
-    check(args.binary, args.m1_binary, args.m0_binary)
+    check(args.binary, args.m1_binary, args.m0_binary, args.reviewed_m2_binary)

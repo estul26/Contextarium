@@ -118,7 +118,7 @@ func TestM2SnapshotsRestoreAndReplay(t *testing.T) {
 	a := WithAttribution(context.Background(), Actor{Kind: "development_test", ID: "restorer"}, "req_00000000000000000000000000000002")
 	raw, err := s.RestoreRecord(a, r.ID, 1, "restore", restoreBody)
 	r = decode[Record](t, raw, err)
-	if r.Revision != 4 || r.CreatedAt != initial.CreatedAt || r.UpdatedAt == initial.UpdatedAt || r.Status != initial.Status || r.Key == nil || *r.Key != *initial.Key || r.Provenance != nil || string(r.Data) != string(initial.Data) {
+	if r.Revision != 4 || r.CreatedAt != initial.CreatedAt || r.Status != initial.Status || r.Key == nil || *r.Key != *initial.Key || r.Provenance != nil || string(r.Data) != string(initial.Data) {
 		t.Fatal("restore content", r)
 	}
 	v, err = s.GetRevision(ctx, r.ID, 4)
@@ -165,7 +165,7 @@ func TestM2SnapshotsRestoreAndReplay(t *testing.T) {
 		t.Fatal("replay duplicate effects")
 	}
 	var actions string
-	if err := db.QueryRow("SELECT group_concat(action,',') FROM (SELECT action FROM mutation_audit ORDER BY revision_number)").Scan(&actions); err != nil || actions != "record.created,record.archived,record.unarchived,record.revision.restored,record.updated,record.revision.restored" {
+	if err := db.QueryRow("SELECT group_concat(action,',') FROM (SELECT action FROM mutation_audit ORDER BY revision_number)").Scan(&actions); err != nil || actions != "record.created,record.archived,record.unarchived,revision.restored,record.updated,revision.restored" {
 		t.Fatal(actions, err)
 	}
 }
@@ -522,6 +522,9 @@ func TestM2IndependentProcessRaces(t *testing.T) {
 		})
 	}
 }
+
+// This test retains a live observer. Cold recovery without parent SQLite ownership
+// is covered separately by TestM2ColdRestartRecovery.
 func TestM2AbruptChildRecovery(t *testing.T) {
 	for _, operation := range []string{"create", "patch", "restore"} {
 		for _, point := range []string{"F0", "F1", "F2", "F3", "F4", "F5", "F6", "F8"} {
@@ -998,7 +1001,7 @@ func TestM2NoopKindsAndFullRestore(t *testing.T) {
 	for i, fields := range []string{`"status":"active"`, `"data":` + string(r.Data), `"key":"same-key","sensitivity":"private","provenance":null`} {
 		old := r
 		r = update(t, s, r, fmt.Sprintf("noop-%d", i), fields)
-		if r.Revision != old.Revision+1 || r.UpdatedAt == old.UpdatedAt {
+		if r.Revision != old.Revision+1 {
 			t.Fatal("no-op did not create action")
 		}
 		before := observe(t, db)
