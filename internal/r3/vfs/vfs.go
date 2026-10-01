@@ -5,7 +5,7 @@ package vfs
 
 /*
 #include <stdlib.h>
-int r3_init(const char*,const char*,long,const char*,int);
+int r3_init(const char*,const char*,const char*,int);
 void r3_phase(const char*);
 void r3_report(void);
 int r3_probe(const char*);
@@ -16,12 +16,12 @@ import (
 	"unsafe"
 )
 
-func Init(root, trace string, target int, mode string, sector int) error {
+func Init(root, trace, mode string, sector int) error {
 	a, b, c := C.CString(root), C.CString(trace), C.CString(mode)
 	defer C.free(unsafe.Pointer(a))
 	defer C.free(unsafe.Pointer(b))
 	defer C.free(unsafe.Pointer(c))
-	if rc := C.r3_init(a, b, C.long(target), c, C.int(sector)); rc != 0 {
+	if rc := C.r3_init(a, b, c, C.int(sector)); rc != 0 {
 		return fmt.Errorf("VFS initialization code %d", rc)
 	}
 	return nil

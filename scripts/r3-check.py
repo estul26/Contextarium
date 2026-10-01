@@ -36,7 +36,8 @@ LABELS = set(('startup open fixture inspection close settings model-validation c
               'write sync truncate delete operation-failed sql-no-rows sqlite-error '
               'path-boundary file-not-allowed metadata-write trace-write trace-flush protocol-write '
               'barrier-input-eof unexpected-barrier-release unknown-fault native-partial-write-failed '
-              'native-write-failed unexpected-mapped-pointer phase-length phase-label').split())
+              'native-write-failed unexpected-mapped-pointer phase-length phase-label '
+              'decision-input-eof decision-reply-invalid').split())
 LABELS.update('mutation-'+op for op in ('create','patch','metadata','archive','unarchive','noop','restore'))
 DIAGNOSTIC_KINDS = {'worker-progress', 'worker-error', 'worker-fatal', 'vfs-operation', 'vfs-fatal'}
 FIXTURE_STAGES = {'launch','readiness','subject','schema','record','update','close'}
@@ -518,17 +519,188 @@ def write_input(path, request):
 def inspect(worker, path):
     return json.loads(run(worker, '-root', path, '-mode', 'inspect'))
 
-def execute(worker, root, case, request, initial, target=0, fault='none', sector=4096, probe=False, native=False, diagnostic=False):
+# Discovery keeps the approved first/middle/last samples. Sequence numbers only
+# identify trace rows; fault identity is the descriptor plus its group prefix.
+TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags')
+FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
+REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
+                       'checkpoint','autocheckpoint','migration','fresh','empty-m1')
+RECOVERY_SCHEDULES = (('discard',17),('retain',17),('reorder-torn',17),
+                      ('reorder-torn',29),('reorder-torn',101))
+
+
+def event_descriptor(event):
+    op=event['op'];meaning=op
+    if op=='write' and event['role']=='wal':
+        data=bytes.fromhex(event['hex'])
+        require(len(data)==event['length'],'target trace write length')
+        meaning='wal-header-reset' if event['offset']==0 else 'wal-frame'
+        if event['offset']!=0 and event['length']==24 and int.from_bytes(data[4:8],'big')!=0:
+            meaning='wal-commit-marker'
+    return candidate_descriptor(dict(event,meaning=meaning))
+
+
+def candidate_descriptor(event):
+    # Fixed labels and integers only; never retain an arbitrary worker string.
+    require(event['phase'] in LABELS and event['name'] in
+            ('store.db','store.db-wal','store.db-journal','probe.db'),'invalid target labels')
+    require(event['role'] in ('database','wal','journal') and
+            event['op'] in ('write','sync','truncate'),'invalid target operation')
+    role='wal' if event['name'].endswith('-wal') else ('journal' if event['name'].endswith('-journal') else 'database')
+    require(event['role']==role,'target role/name mismatch')
+    meanings=('wal-header-reset','wal-frame','wal-commit-marker') if event['op']=='write' and role=='wal' else (event['op'],)
+    require(event['meaning'] in meanings,'invalid target semantic')
+    for name in ('offset','length','flags'):
+        require(type(event[name]) is int and 0<=event[name]<2**63,'invalid target range')
+    return {k:event[k] for k in TARGET_FIELDS}
+
+
+def target_group(descriptor):
+    return tuple(descriptor[k] for k in ('phase','role','meaning'))
+
+
+def make_target(items, index, samples):
+    prefix=[event_descriptor(e) for e in items[:index+1]]
+    return {'descriptor':prefix[-1], 'prefix':prefix, 'samples':samples,
+            'group_position':index+1,'group_count':len(items),'baseline_seq':items[index]['seq']}
+
+
+def target_summary(plan):
+    return {k:plan[k] for k in ('descriptor','samples','group_position','group_count','baseline_seq')} | {
+        'prefix_sha256':digest(encoded(plan['prefix']))}
+
+
+class TargetMatcher:
+    """Strict ordered prefix within ONE discovered phase/role/semantic group.
+
+    Other groups may change length; matching-group insertions, reordering or
+    descriptor changes fail before injection. Repeated identical descriptors
+    occupy distinct prefix positions: the Nth planned position is explicit.
+    First/middle/last refer to the recorded no-fault discovery group, not a
+    promise about the suffix of an execution altered by the injected failure.
+    """
+    def __init__(self, plan):
+        self.plan=plan;self.group=target_group(plan['descriptor']);self.seen=0
+        self.last_seq=0;self.last_observed=[];self.selected_seq=None
+        self.trace_verified=False;self.decision_sent=False;self.ack_before_fault=0
+        require(plan['prefix'] and plan['prefix'][-1]==plan['descriptor'],'invalid target prefix')
+
+    def observe(self, event):
+        require(self.selected_seq is None,'repeated target decision')
+        descriptor=candidate_descriptor(event)
+        require(type(event['seq']) is int and event['seq']>self.last_seq,'decision sequence not increasing')
+        self.last_seq=event['seq']
+        self.last_observed=(self.last_observed+[dict(descriptor,seq=event['seq'])])[-8:]
+        if target_group(descriptor)!=self.group:return False
+        expected=self.plan['prefix'][self.seen]
+        require(descriptor==expected,'required target group prefix changed')
+        self.seen+=1
+        if self.seen!=len(self.plan['prefix']):return False
+        self.selected_seq=event['seq']
+        return True
+
+    def require_reached(self, hit):
+        require(self.trace_verified and self.decision_sent and hit is not None and
+                hit['seq']==self.selected_seq,'required descriptor target not reached')
+
+    def diagnostics(self):
+        return {'planned':target_summary(self.plan),'observed_group_prefix_count':self.seen,
+                'last_observed':self.last_observed,'selected_seq':self.selected_seq,
+                'trace_verified_before_decision':self.trace_verified,
+                'decision_sent':self.decision_sent,'acknowledged_before_fault':self.ack_before_fault}
+
+
+def verify_pending_trace(trace, event):
+    # The VFS flushed its private pre-row before blocking. Read only a bounded
+    # tail; a row larger than the bound fails rather than authorizing a fault.
+    with trace.open('rb') as source:
+        source.seek(0,os.SEEK_END);size=source.tell();source.seek(max(0,size-256*1024))
+        tail=source.read(256*1024)
+    require(tail.endswith(b'\n'),'pending trace row incomplete')
+    pending=json.loads(tail.splitlines()[-1])
+    require(pending['stage']=='pre' and pending['seq']==event['seq'],'pending trace identity mismatch')
+    require(event_descriptor(pending)==candidate_descriptor(event),'pending trace descriptor mismatch')
+
+
+def decide_io(stream, trace, matcher, event, acknowledgements):
+    inject=matcher.observe(event)  # Any mismatch raises BEFORE a command is sent.
+    if inject:
+        verify_pending_trace(trace,event)
+        matcher.trace_verified=True
+        # Only complete successful mutation responses already fsynced in the
+        # external ledger count. A WAL marker is never an acknowledgement.
+        matcher.ack_before_fault=sum('result_text' in a for a in acknowledgements)
+    stream.write((('i' if inject else 'c')+' '+str(event['seq'])+'\n').encode())
+    stream.flush()
+    if inject:matcher.decision_sent=True
+
+
+def record_acknowledgement(ledger, acknowledgements, case, request, message):
+    require(message['kind']=='response' and message['ok'] is True,'invalid acknowledgement')
+    if 'result_text' in message:
+        require(isinstance(message['result_text'],str) and message['result_text'], 'incomplete mutation response')
+        json.loads(message['result_text'])
+    ack_request={'Operation':'create','Key':message['key'],'Body':message['body_text']} if 'body_text' in message else request
+    entry={'case':case,'request_sha256':digest(encoded(ack_request)),'response':message,'response_sha256':digest(encoded(message))}
+    ledger.write(encoded(entry)+b'\n');ledger.flush();os.fsync(ledger.fileno())
+    acknowledgements.append(message)  # Never visible to the target decision first.
+
+
+def fault_modes(target):
+    op=target['descriptor']['op']
+    return ['cut-before','cut-after','ioerr']+(['full'] if op in ('write','truncate') else [])+(['partial'] if op=='write' else [])
+
+
+class AcceptanceCoverage:
+    """Final PASS requires every planned family/sector/target/mode and post-ack
+    checkpoint boundaries, not merely a positive count from an early family."""
+    def __init__(self):
+        self.planned={};self.completed=set();self.post_ack=set()
+
+    def plan(self, operation, sector, targets):
+        key=(operation,sector)
+        require(key not in self.planned and targets,'missing/repeated family plan')
+        self.planned[key]={(p['baseline_seq'],mode) for _,p in targets for mode in fault_modes(p)}
+
+    def complete(self, operation, sector, plan, fault, results, ack_before_fault):
+        key=(operation,sector);item=(plan['baseline_seq'],fault)
+        require(key in self.planned and item in self.planned[key],'unplanned completed case')
+        identity=(*key,*item)
+        require(identity not in self.completed,'duplicate completed case')
+        require([(r['schedule'],r['seed']) for r in results]==list(RECOVERY_SCHEDULES), 'incomplete recovery schedules')
+        require(all(r['outcome'] in ('present','absent') for r in results),'invalid recovered outcome')
+        self.completed.add(identity)
+        if ack_before_fault>0:
+            d=plan['descriptor'];self.post_ack.add((operation,sector,d['role'],d['meaning']))
+
+    def require_complete(self):
+        families={(op,sector) for op in REQUIRED_OPERATIONS for sector in (512,4096)}
+        require(set(self.planned)==families,'required operation/sector family absent')
+        expected={(*key,*item) for key,items in self.planned.items() for item in items}
+        require(self.completed==expected,'required target/fault cases incomplete')
+        required_ack=set()
+        for sector in (512,4096):
+            for op in ('checkpoint','autocheckpoint'):
+                required_ack.update((op,sector,'database',meaning) for meaning in ('write','sync'))
+            required_ack.add(('checkpoint',sector,'wal','truncate'))
+            required_ack.add(('autocheckpoint',sector,'wal','wal-header-reset'))
+        require(required_ack<=self.post_ack,'new acknowledged-effect recovery coverage missing')
+
+
+def execute(worker, root, case, request, initial, target=None, fault='none', sector=4096, probe=False, native=False, diagnostic=False):
     if diagnostic:
-        require(target == 0 and fault == 'none' and not probe and request['Operation'] == 'create',
+        require(target is None and fault == 'none' and not probe and request['Operation'] == 'create',
                 'diagnostic entry forbids targets, faults, probes and non-create requests')
+    require((target is None and fault=='none') or (isinstance(target,dict) and fault in FAULT_MODES), 'invalid target/fault pair')
+    if target is not None:require(fault in fault_modes(target),'fault mode incompatible with target operation')
+    matcher=TargetMatcher(target) if target is not None else None
     budget(root)
     live = owned(root, 'live') if probe else materialize(root, 'live', initial)
     config = root / 'input.json'
     write_input(config, request)
     trace = root / 'trace.jsonl'
     if trace.exists(): trace.unlink() # Controller-owned file in the marked run root.
-    command = [str(worker), '-root', str(live), '-mode', 'probe' if probe else ('native' if native else 'run'), '-trace', str(trace), '-target', str(target), '-fault', fault, '-sector', str(sector)]
+    command = [str(worker), '-root', str(live), '-mode', 'probe' if probe else ('native' if native else 'run'), '-trace', str(trace), '-fault', fault, '-sector', str(sector)]
     if not probe: command += ['-input',str(config)]
     if diagnostic: command += ['-diagnostic-only']
     ack = []; messages = []; hit = None; progress = {}
@@ -539,7 +711,7 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
         child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr, env=env)
         selector = selectors.DefaultSelector();selector.register(child.stdout, selectors.EVENT_READ)
         buffer = b''; finished = False; done_received = False; deadline = time.monotonic()+45
-        received = 0; lines = 0; bad_line = None; terminated = False
+        received = 0; lines = 0; candidates = 0; bad_line = None; terminated = False
         stage = 'protocol-wait'; primary = None
         try:
             while not finished:
@@ -563,9 +735,17 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
                     stage = 'protocol-json'; bad_line = {'bytes':len(line),'sha256':digest(line)}
                     msg = json.loads(line)
                     require(isinstance(msg,dict) and msg.get('kind') in
-                            {'worker-progress','worker-error','worker-fatal','setting','settings','target','response','state','vfs-coverage','done'},
+                            {'worker-progress','worker-error','worker-fatal','setting','settings','io-candidate','target','response','state','vfs-coverage','done'},
                             'malformed protocol envelope')
-                    lines += 1; bad_line = None; messages.append(msg)
+                    bad_line = None
+                    if msg['kind']=='io-candidate':
+                        stage='pre-injection-descriptor-check'
+                        candidates+=1
+                        require(candidates<=32768,'I/O decision bound exceeded')
+                        require(matcher is not None,'unexpected I/O decision request')
+                        decide_io(child.stdin,trace,matcher,msg,ack)
+                        continue
+                    lines += 1; messages.append(msg)
                     require(lines <= 2048, 'protocol record bound exceeded')
                     safe = safe_diagnostic(msg)
                     if safe: track_progress(progress, safe)
@@ -574,16 +754,13 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
                         log_setting(msg, case)
                     if msg['kind'] == 'target':
                         stage = 'target-barrier'
-                        require(hit is None and msg['seq'] == target and msg['mode'] == fault, 'wrong/repeated target')
+                        require(matcher is not None and matcher.trace_verified and matcher.decision_sent and
+                                hit is None and msg['seq'] == matcher.selected_seq and msg['mode'] == fault, 'wrong/repeated target')
                         hit=msg
                         if fault.startswith('cut-'): finished=True;break
                     if msg['kind'] == 'response' and msg['ok']:
                         stage = 'acknowledgement-ledger'
-                        # An acknowledged result is recorded only after complete receipt.
-                        ack.append(msg)
-                        ack_request={'Operation':'create','Key':msg['key'],'Body':msg['body_text']} if 'body_text' in msg else request
-                        entry={'case':case,'request_sha256':digest(encoded(ack_request)),'response':msg,'response_sha256':digest(encoded(msg))}
-                        ledger.write(encoded(entry)+b'\n');ledger.flush();os.fsync(ledger.fileno())
+                        record_acknowledgement(ledger,ack,case,request,msg)
                     if msg['kind'] == 'done': finished=True;done_received=True;break
             if diagnostic:
                 stage = 'diagnostic-natural-exit'
@@ -597,7 +774,8 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
                 child.kill();terminated=True;child.wait(timeout=5)
                 require(child.returncode == -signal.SIGKILL, 'test child did not die without cleanup')
             stage = 'fault-target-verification'
-            require((target == 0) == (hit is None), 'requested fault not reached')
+            if matcher:matcher.require_reached(hit)
+            else:require(hit is None,'unexpected fault target')
             if native:
                 image=image_files(live)
                 result={'image':image,'ack':ack,'messages':messages}
@@ -605,14 +783,16 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
                 stage = 'trace-validation'
                 events, all_events=read_trace(trace)
                 if hit:
-                    require(target in all_events, 'target missing from trace')
-                    chosen=all_events[target]
+                    require(hit['seq'] in all_events, 'target missing from trace')
+                    chosen=all_events[hit['seq']]
+                    require(event_descriptor(chosen)==target['descriptor'],'verified target trace changed')
                     require(chosen['op'] in ('write','sync','truncate'), 'fault outside approved operation')
                 model=Model(initial)
                 for event in events: model.consume(event)
                 # Also retained in diagnostic-only mode; no crash() schedules run.
                 require(image_files(live) == model.live, 'live file/model mismatch: untraced I/O or broken model')
-                result={'events':events,'all':all_events,'model':model,'ack':ack,'messages':messages,'trace_sha256':digest(trace.read_bytes()),'ack_sha256':digest((root/'acks.jsonl').read_bytes())}
+                result={'events':events,'all':all_events,'model':model,'ack':ack,'messages':messages,'trace_sha256':digest(trace.read_bytes()),'ack_sha256':digest((root/'acks.jsonl').read_bytes()),
+                        'target_seq':hit['seq'] if hit else None,'ack_before_fault':matcher.ack_before_fault if matcher else 0}
             stage = 'scratch-cleanup'
             remove_owned(root,live)
             return result
@@ -627,7 +807,8 @@ def execute(worker, root, case, request, initial, target=0, fault='none', sector
                                    {'received_bytes':received,'complete_records':lines,'done_received':done_received,
                                     'partial_bytes':len(buffer),'partial_sha256':digest(buffer),'malformed_record':bad_line},
                                    summary, progress, case=case,
-                                   acknowledged=len(ack), target_reached=hit is not None)
+                                   acknowledged=len(ack), target_reached=hit is not None,
+                                   targeting=matcher.diagnostics() if matcher else None,decision_records=candidates)
             except BaseException as diagnostic_error:
                 # Do not replace the primary failure even if evidence collection fails.
                 try: log(kind='diagnostic-collection-failed', **IDENTITY, failure_stage=stage,
@@ -855,7 +1036,7 @@ def raw_validation(worker,root):
         partial.consume(event)
         if event['seq']==firstsync['seq']:break
     require(partial.crash('discard',17)=={'probe.db':b'abcdef'},'native synced bytes reconstruction')
-    failed=execute(worker,root,'probe-failed-sync',{}, {},target=firstsync['seq'],fault='ioerr',probe=True)
+    failed=execute(worker,root,'probe-failed-sync',{}, {},target=make_target([firstsync],0,['first']),fault='ioerr',probe=True)
     require(any(m.get('kind')=='response' and not m['ok'] for m in failed['messages']),'failed sync was reported successful')
     require('probe.db' not in failed['model'].crash('discard',17),'native failed-sync behavior')
     require(any(e['op']=='truncate' and e['offset']==4 for e in result['events']),'truncate not intercepted')
@@ -976,17 +1157,14 @@ def select_targets(events,operation):
     groups={}
     for e in events:
         if e['op'] not in ('write','sync','truncate') or e['phase']=='open':continue
-        meaning=e['op']
-        if e['op']=='write' and e['role']=='wal':
-            data=bytes.fromhex(e['hex'])
-            meaning='wal-frame'
-            if e['offset']==0:meaning='wal-header-reset'
-            elif e['length']==24 and int.from_bytes(data[4:8],'big')!=0:meaning='wal-commit-marker'
+        meaning=event_descriptor(e)['meaning']
         key=(e['phase'],e['role'],meaning)
         groups.setdefault(key,[]).append(e)
     result=[]
     for key,items in groups.items():
-        for i in sorted({0,len(items)//2,len(items)-1}):result.append((key,items[i]))
+        positions={'first':0,'middle':len(items)//2,'last':len(items)-1}
+        for i in sorted(set(positions.values())):
+            result.append((key,make_target(items,i,[name for name,j in positions.items() if i==j])))
     require(result,'no targets discovered')
     require(any(k[1]=='wal' and k[2]=='sync' for k in groups),'WAL sync not observed')
     if operation in ('checkpoint','autocheckpoint'):
@@ -995,7 +1173,7 @@ def select_targets(events,operation):
     if operation=='autocheckpoint':require(sum(e['op']=='write' and e['role']=='wal' and e['offset']==0 for e in events)>=2,'WAL reset after automatic checkpoint missing')
     if operation=='checkpoint':require(any(k[1]=='wal' and k[2]=='truncate' for k in groups),'WAL truncation missing')
     require(any(k[2]=='wal-commit-marker' for k in groups),'commit marker not identified')
-    return sorted(result,key=lambda v:v[1]['seq'])
+    return sorted(result,key=lambda v:v[1]['baseline_seq'])
 
 def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
     # Inspect one fresh positive image first. Only copies of its observed oracle
@@ -1104,7 +1282,7 @@ def main():
     old=owned(root,'m1');legacy=m1_fixture(m1,old);oldstate=inspect(worker,old);oldimage=image_files(old)
     emptyold=owned(root,'empty-m1');m1_fixture(m1,emptyold,empty=True);emptystate=inspect(worker,emptyold);emptyimage=image_files(emptyold)
     requests += [{'Operation':'migration','Body':'{}','Legacy':legacy},{'Operation':'fresh','Body':'{}'},{'Operation':'empty-m1','Body':'{}'}]
-    cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256()
+    cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256();acceptance=AcceptanceCoverage()
     for request in requests:
         op=request['Operation'];seedstate=oldstate if op=='migration' else before;seedimage=oldimage if op=='migration' else initial
         if op=='empty-m1':seedstate,seedimage=emptystate,emptyimage
@@ -1119,17 +1297,17 @@ def main():
             log(kind='settings',operation=op,sector=sector,value={q:setting_value(q,v) for q,v in settings.items() if q in SETTINGS})
             p=materialize(root,'baseline',base['model'].crash('retain',17));oracle(seedstate,inspect(worker,p),request,base['ack'],schema);remove_owned(root,p)
             targets=select_targets(base['events'],op)
-            log(kind='schedule',operation=op,sector=sector,selection='first-middle-last per phase/role/semantic; all listed targets mandatory',targets=[{'seq':e['seq'],'phase':e['phase'],'role':e['role'],'op':e['op'],'meaning':key[2],'offset':e['offset'],'length':e['length']} for key,e in targets])
+            acceptance.plan(op,sector,targets)
+            log(kind='schedule',operation=op,sector=sector,
+                selection='discovery first-middle-last; descriptor and ordered group prefix checked before injection; no substitution',
+                targets=[target_summary(p) for _,p in targets])
             for key,target in targets:
-                modes=['cut-before','cut-after','ioerr']
-                if target['op'] in ('write','truncate'):modes+=['full']
-                if target['op']=='write':modes+=['partial']
-                for fault in modes:
-                    case=f'{op}-s{sector}-{target["seq"]}-{fault}'
-                    got=execute(worker,root,case,request,seedimage,target['seq'],fault,sector)
-                    reached=got['all'][target['seq']]
-                    require(all(reached[k]==target[k] for k in ('op','name','role','offset','length','phase','flags')),'fault schedule target drift')
-                    schedules=[('discard',17),('retain',17)]+[('reorder-torn',seed) for seed in SEEDS]
+                for fault in fault_modes(target):
+                    case=f'{op}-s{sector}-b{target["baseline_seq"]}-{fault}'
+                    got=execute(worker,root,case,request,seedimage,target,fault,sector)
+                    reached=got['all'][got['target_seq']]
+                    require(event_descriptor(reached)==target['descriptor'],'fault schedule target drift')
+                    schedules=RECOVERY_SCHEDULES
                     results=[]
                     for schedule,seed in schedules:
                         image=got['model'].crash(schedule,seed)
@@ -1139,8 +1317,10 @@ def main():
                         replay(worker,root,p,seedstate,request,got['ack'],schema)
                         item={'schedule':schedule,'seed':seed,'outcome':outcome,'image_sha256':digest(encoded({n:digest(b) for n,b in image.items()})),'state_sha256':digest(encoded(state))}
                         results.append(item);recoveries+=1;remove_owned(root,p)
-                    report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':target['seq'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
+                    report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],'planned':target_summary(target),'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
+                    acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
                     log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],key[2],fault))
+    acceptance.require_complete()
     log(kind='FINAL',harness_validation='PASS',T18='PASS',T30='PASS',R3='PASS within write-back-v1 model',cases=cases,recoveries=recoveries,coverage=sorted(coverage),manifest_sha256=manifest.hexdigest(),artifact_upload=False,paid_usage_authorized=0)
     # Only the marked, test-created root is removed, after results/hashes were logged.
     require(root.parent.resolve()==Path(os.environ['RUNNER_TEMP']).resolve() and (root/MARKER).is_file(),'final cleanup ownership')

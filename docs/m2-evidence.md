@@ -9,7 +9,9 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
-Latest R3 evidence: [fifth dedicated job](#fifth-dedicated-job--prerequisites-pass-matrix-stopped-on-missing-target).
+Current targeting correction: [source review only](#targeting-correction--source-review-only-runtime-not-run); new regressions and runtime validation NOT RUN.
+
+Latest executed R3 evidence: [fifth dedicated job](#fifth-dedicated-job--prerequisites-pass-matrix-stopped-on-missing-target).
 The job failed after partial matrix coverage; T18 PARTIAL, T30 BLOCKED, no remaining execution slots.
 
 ## Execution boundary
@@ -740,6 +742,122 @@ with no paid runner/service or storage requested.
 passed at workflow SHA `3b031db317161cebf2c93d6239f36078bacd7ba0`; it excludes the
 tagged harness and is not R3 evidence. No merge, deployment or M3; architecture
 deviations: **NONE**. Any further execution needs a new explicit allowance.
+
+## Targeting correction — source review only; runtime NOT RUN
+
+This correction starts from reporting checkpoint
+`0441d9c597f0591ccba14af6ed80456416940c25`. No intervening remote commits were
+present. The last executed harness remains
+`305931711ff79ac32853794fb165fe32a6d45f90`; the application remains
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`. No new execution allowance was granted.
+The fifth run's **386 cases / 1,930 recoveries** above retain their original
+source, schedules and limitations; they do not validate this correction.
+
+### Diagnosis and bounded targeting change
+
+Source confirms that discovery copied a global sequence number into the next
+worker. The VFS `before` hook compared only that number; descriptor comparison
+occurred after injection. Global sequence includes other file operations, so
+inserting/removing an earlier operation can shift it without identifying the
+intended fault operation. The fifth-run evidence proves the planned occurrence
+47 was not reached and that the worker completed through occurrence 44 with one
+acknowledgement. It does not retain the full raw trace or establish why the
+operation sequence changed. Entropy, timestamps or SQLite layout variation are
+possible explanations, not diagnosed causes; production entropy/time is unchanged.
+
+Proposed correction: **a synchronous pre-I/O decision barrier**, confined to the
+tagged test VFS and controller. For fault runs, each pending write/sync/truncate
+publishes bounded metadata and waits. The controller matches phase, file name,
+role, operation, semantic meaning, offset, length and flags. It verifies the
+ordered descriptor prefix within the selected phase/role/semantic group, then
+checks the still-pending private pre-trace row, including WAL commit-marker bytes,
+**before** sending an injection decision. Raw bytes stay private. The VFS requires
+a reply naming this live sequence; malformed/stale/EOF replies fail without
+performing that pending I/O. Cut-after is armed before the native call and pauses
+after its post row; the existing IOERR/FULL/partial-write behavior is unchanged.
+
+The global `-target` ordinal input is removed. Global sequence numbers remain
+monotonic trace identities and diagnostics. Case IDs explicitly label discovery
+sequence with `b`; successful reports include both planned descriptor/discovery
+sequence and actual reached sequence. Later descriptor checks remain additional
+assertions, not the first protection against a wrong injection.
+
+**Selection mapping:** the same no-fault discovery groups still select positions
+0, floor(N/2) and N-1. When positions coincide, one target retains every applicable
+first/middle/last label. Group count, position, labels, descriptor and prefix hash
+are logged. Other groups may change length without shifting the selected group.
+Repeated identical descriptors are distinct ordered group-prefix positions; the
+Nth planned occurrence is explicit. Another decision after selection is rejected.
+A selected-group insertion/reordering or changed descriptor fails before injection;
+a shortened group or absent target fails at completion. There is no nearby-target
+substitution, retry or skip. An indistinguishable repeated descriptor is resolved
+by that documented group position, not a global ordinal.
+
+First/middle/last continue to mean positions in the recorded no-fault discovery
+trace, not a counterfactual suffix after a fault changes execution. This correction
+does not guarantee that a variable selected group can be reproduced: strict
+prefix/range checks can still block the matrix. Runtime feasibility and handshake
+cost remain unverified. No production entropy/time seam or persistence-model
+change is introduced to force reproducibility. The protocol keeps its existing
+byte/time bounds and separately caps decision records at 32,768; reaching a bound
+fails with incomplete coverage. No-fault runs do not use the decision protocol.
+
+Missing/mismatched-target diagnostics retain planned descriptor, baseline sequence,
+position/count/labels, prefix hash, matched-prefix count, up to eight observed
+safe descriptors, selected live sequence, trace-verification/decision status and
+acknowledgement count. Existing primary-error/child/cleanup diagnostics remain.
+No payload, page hex, arbitrary exception text or private path is added to logs.
+
+### Prepared tests and acceptance checks
+
+[Targeting regression source](../scripts/test_r3_targeting.py) contains **26 prepared
+fake-trace/dependency tests, all NOT RUN**. Cases cover unrelated earlier events;
+wrong phase/role/semantic operation; changed ranges/prefix order; private-trace and
+live-sequence verification before the command; missing-target planned/observed
+privacy; duplicate descriptors/decisions; first/middle/last and collapsed labels;
+missing required groups; external-ledger ordering/failure and incomplete responses;
+commit-marker-not-acknowledgement; absent families/sectors, missing cases,
+incomplete recovery schedules, zero acknowledged-effect coverage and a positive
+synthetic completeness control. They do not launch a binary, SQLite or a fault.
+The previously executed 16 fixture regressions are unchanged and were not rerun.
+These prepared tests do not yet validate the C/Go/Python handshake at runtime.
+
+A new final completeness guard requires all 12 existing operation families at
+both sector sizes, every planned target/fault combination exactly once, and all
+five existing recovery schedules/seeds for each completed case. Complete no-op,
+restore, migration/adoption, fresh/empty-M1 initialization and checkpoint families
+cannot disappear while the final result says PASS. Existing discovery requirements
+for checkpoint database writes/sync, WAL truncation and automatic WAL reset remain.
+
+The guard additionally requires completed recovery after **newly acknowledged
+mutation responses** at checkpoint database write/sync and WAL-truncate boundaries,
+and automatic-checkpoint database write/sync and WAL-reset boundaries, for both
+sector sizes. The controller adds an acknowledgement to its visible list only
+after a complete successful response has been parsed and written/flushed/fsynced
+to the external ledger. Its count is captured before authorizing the relevant
+fault; a later response or WAL commit marker cannot satisfy that count. The
+unchanged full oracle verifies those acknowledgements after each recovered image.
+A zero count cannot pass final acceptance. Historical completed cases are not
+loaded into this new execution's coverage accounting.
+
+**Static checks only:** Python AST parsing and structural/order inspection; Go
+formatting; C `-fsyntax-only` against the cached pinned go-sqlite3 v1.14.52 header;
+whitespace, scope and public-content review. AST comparison preserves `Model`,
+`oracle`, consistency/replay, positive/negative controls, M1 fixture/cleanup,
+no-fault diagnostic, required settings/no-mmap checks and resource limits.
+Successful-sync guarantees, recovery schedules and seeds are unchanged.
+No controller/test import, regression execution, tagged build, fixture binary,
+probe, negative control, fault schedule, manual Actions launch or rerun occurred.
+Ordinary PR CI may run automatically; it is not R3 evidence.
+
+Remaining acceptance work includes validating this correction and its prepared
+tests, complete no-op and restore coverage, migration/initialization faults,
+checkpoint/database-write/truncation/reset faults, and survival of newly
+acknowledged effects. Source inspection supplies none of that runtime evidence.
+T18 **PARTIAL**, T30 **BLOCKED**, D6/R3 **OPEN**, M2 acceptance **PENDING**, PR #6
+**DRAFT**, additional execution slots **ZERO**. Application/migrations/dependencies,
+D1–D5, ordinary CI and every existing workflow gate are unchanged. Architecture
+deviations: **NONE**; the test-selection change above is proposed for source review.
 
 ## Review boundary
 

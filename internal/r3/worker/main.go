@@ -78,13 +78,12 @@ func main() {
 	mode := flag.String("mode", "", "test role")
 	cfg := flag.String("input", "", "input JSON")
 	trace := flag.String("trace", "", "trace path")
-	aim := flag.Int("target", 0, "I/O occurrence")
 	fault := flag.String("fault", "none", "test fault")
 	sector := flag.Int("sector", 4096, "modeled sector bytes")
 	diagnosticOnly := flag.Bool("diagnostic-only", false, "one no-fault create, inspect, clean close; no probes or schedules")
 	flag.Parse()
 	protocolProgress = *mode == "run" || *mode == "native" || *mode == "probe"
-	if *diagnosticOnly && (*aim != 0 || *fault != "none" || (*mode != "native" && *mode != "run")) {
+	if *diagnosticOnly && (*fault != "none" || (*mode != "native" && *mode != "run")) {
 		must(errors.New("invalid diagnostic role or fault configuration"))
 	}
 	path := filepath.Join(*root, "store.db")
@@ -99,7 +98,7 @@ func main() {
 		return
 	}
 	if *mode == "probe" {
-		must(vfs.Init(*root, *trace, *aim, *fault, *sector))
+		must(vfs.Init(*root, *trace, *fault, *sector))
 		startPhase("model-validation")
 		rc := vfs.Probe(filepath.Join(*root, "probe.db"))
 		emit(map[string]any{"kind": "response", "ok": rc == 0, "code": rc})
@@ -126,7 +125,7 @@ func main() {
 		must(errors.New("diagnostic permits one create only"))
 	}
 	if *mode == "run" {
-		must(vfs.Init(*root, *trace, *aim, *fault, *sector))
+		must(vfs.Init(*root, *trace, *fault, *sector))
 		instrumented = true
 	}
 	startPhase("open")

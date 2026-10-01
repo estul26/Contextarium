@@ -13,7 +13,7 @@ typedef struct { sqlite3_file base; sqlite3_file *real; char name[32]; } RFile;
 static sqlite3_vfs shim, *native;
 static FILE *logfile;
 static char rootdir[PATH_MAX], phase[64]="startup", fault[32];
-static long sequence, target;
+static long sequence, target; /* target is selected in this execution, never copied. */
 static unsigned long reads, fetches, null_fetches, mmap_rejections;
 static int sector=4096;
 static const sqlite3_io_methods methods;
@@ -51,7 +51,36 @@ static void reached(long id) {
  if(printf("{\"kind\":\"target\",\"seq\":%ld,\"mode\":\"%s\"}\n",id,fault)<0 || fflush(stdout)) die("protocol-write");
 }
 static void pause_here(void) { char c; if(read(STDIN_FILENO,&c,1)!=1) die("barrier-input-eof"); die("unexpected-barrier-release"); }
-static int before(long id) {
+/* Classify the pending operation before any native write/sync/truncate. No page
+ * bytes cross the public decision protocol. The private trace still has bytes. */
+static const char* semantic(const char *op,const char *name,sqlite3_int64 off,int n,const void *data) {
+ if(strcmp(op,"write") || strcmp(role(name),"wal")) return op;
+ if(off==0) return "wal-header-reset";
+ if(n==24 && data) {
+  const unsigned char *p=data;
+  if(p[4] || p[5] || p[6] || p[7]) return "wal-commit-marker";
+ }
+ return "wal-frame";
+}
+static void decide(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
+ if(target || !strcmp(fault,"none")) return;
+ /* One pending I/O at a time. The controller verifies its planned descriptor
+  * and semantic-group prefix before replying. An EOF/bad/stale reply exits
+  * without performing this operation or injecting a fault elsewhere. */
+ if(printf("{\"kind\":\"io-candidate\",\"seq\":%ld,\"phase\":\"%s\",\"op\":\"%s\",\"name\":\"%s\",\"role\":\"%s\",\"meaning\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d}\n",
+    id,phase,op,name,role(name),semantic(op,name,off,n,data),(long long)off,n,flags)<0 || fflush(stdout)) die("protocol-write");
+ char reply[64];size_t used=0;
+ do {
+  if(used==sizeof(reply)-1)die("decision-reply-invalid");
+  if(read(STDIN_FILENO,reply+used,1)!=1)die("decision-input-eof");
+ } while(reply[used++]!='\n');
+ reply[used]=0;
+ char action=0,extra=0;long acknowledged=0;
+ if(sscanf(reply,"%c %ld %c",&action,&acknowledged,&extra)!=2 || acknowledged!=id || (action!='c' && action!='i'))die("decision-reply-invalid");
+ if(action=='i')target=id;
+}
+static int before(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
+ decide(id,op,name,off,n,flags,data);
  if(id!=target) return 0;
  if(!strcmp(fault,"cut-after")) return 0;
  reached(id);
@@ -64,13 +93,13 @@ static void after(long id) {if(id==target && !strcmp(fault,"cut-after")){reached
 static int close_file(sqlite3_file *f) {RFile *p=(RFile*)f;int rc=p->real->pMethods->xClose(p->real);sqlite3_free(p->real);p->base.pMethods=0;return rc;}
 static int read_file(sqlite3_file *f,void *b,int n,sqlite3_int64 o){RFile*p=(RFile*)f;reads++;return p->real->pMethods->xRead(p->real,b,n,o);}
 static int write_file(sqlite3_file *f,const void *b,int n,sqlite3_int64 o){
- RFile*p=(RFile*)f;long id=pre("write",p->name,o,n,0,b);int rc=before(id),applied=0;
+ RFile*p=(RFile*)f;long id=pre("write",p->name,o,n,0,b);int rc=before(id,"write",p->name,o,n,0,b),applied=0;
  if(rc && id==target && !strcmp(fault,"partial")){applied=n/2;int inner=p->real->pMethods->xWrite(p->real,b,applied,o);if(inner!=SQLITE_OK)die("native-partial-write-failed");}
  else if(!rc){rc=p->real->pMethods->xWrite(p->real,b,n,o);if(rc==SQLITE_OK)applied=n;else die("native-write-failed");}
  post(id,rc,applied);after(id);return rc;
 }
-static int truncate_file(sqlite3_file*f,sqlite3_int64 size){RFile*p=(RFile*)f;long id=pre("truncate",p->name,size,0,0,0);int rc=before(id);if(!rc)rc=p->real->pMethods->xTruncate(p->real,size);post(id,rc,rc==0);after(id);return rc;}
-static int sync_file(sqlite3_file*f,int flags){RFile*p=(RFile*)f;long id=pre("sync",p->name,0,0,flags,0);int rc=before(id);if(!rc)rc=p->real->pMethods->xSync(p->real,flags);post(id,rc,rc==0);after(id);return rc;}
+static int truncate_file(sqlite3_file*f,sqlite3_int64 size){RFile*p=(RFile*)f;long id=pre("truncate",p->name,size,0,0,0);int rc=before(id,"truncate",p->name,size,0,0,0);if(!rc)rc=p->real->pMethods->xTruncate(p->real,size);post(id,rc,rc==0);after(id);return rc;}
+static int sync_file(sqlite3_file*f,int flags){RFile*p=(RFile*)f;long id=pre("sync",p->name,0,0,flags,0);int rc=before(id,"sync",p->name,0,0,flags,0);if(!rc)rc=p->real->pMethods->xSync(p->real,flags);post(id,rc,rc==0);after(id);return rc;}
 static int size_file(sqlite3_file*f,sqlite3_int64*n){RFile*p=(RFile*)f;return p->real->pMethods->xFileSize(p->real,n);}
 static int lock_file(sqlite3_file*f,int n){RFile*p=(RFile*)f;return p->real->pMethods->xLock(p->real,n);}
 static int unlock_file(sqlite3_file*f,int n){RFile*p=(RFile*)f;return p->real->pMethods->xUnlock(p->real,n);}
@@ -102,9 +131,10 @@ static int open_file(sqlite3_vfs*v,const char*name,sqlite3_file*f,int flags,int*
  post(id,rc,rc==0 && !exists);return rc;
 }
 static int delete_file(sqlite3_vfs*v,const char*name,int syncdir){(void)v;const char*n=basename_checked(name);long id=pre("delete",n,0,0,syncdir,0);int rc=native->xDelete(native,name,syncdir);post(id,rc,rc==0);return rc;}
-int r3_init(const char*root,const char*trace,long aim,const char*mode,int unit){
+int r3_init(const char*root,const char*trace,const char*mode,int unit){
  if(strlen(root)>=sizeof(rootdir) || strlen(mode)>=sizeof(fault) || (unit!=512 && unit!=4096)) return 1;
- strcpy(rootdir,root);strcpy(fault,mode);target=aim;sector=unit;
+ if(strcmp(mode,"none") && strcmp(mode,"cut-before") && strcmp(mode,"cut-after") && strcmp(mode,"ioerr") && strcmp(mode,"full") && strcmp(mode,"partial")) return 1;
+ strcpy(rootdir,root);strcpy(fault,mode);target=0;sector=unit;
  logfile=fopen(trace,"wx");if(!logfile)return 2;
  native=sqlite3_vfs_find(0);if(!native || native->iVersion<2)return 3;
  shim=*native;shim.zName="contextarium-r3-test-only";shim.szOsFile=sizeof(RFile);shim.xOpen=open_file;shim.xDelete=delete_file;
