@@ -127,4 +127,11 @@ rewriting the ledger or mutation stores. It never uses an existing candidate DB.
 
 R1 graceful SIGTERM/drain, R2 abrupt test-child termination, and R3 simulated
 storage/power loss are distinct. Passing these commands establishes no R3 result.
-Do not provision its proposed isolated environment without separate approval.
+The owner subsequently authorized the bounded standard-runner R3 harness described
+in the [evidence document](m2-evidence.md). It is excluded from ordinary builds;
+`-tags r3` compiles the separate test worker against the pinned SQLite header.
+The gated R3 workflow permits only two explicitly marked pushes, rejects reruns,
+serializes jobs, and enforces a 60-minute timeout. It does not change ordinary CI.
+No artifact/cache upload, paid runner, personal VM or host storage fault is allowed.
+Harness validation and negative controls must pass before the application matrix.
+Current R3 status remains unexecuted; compilation is not acceptance evidence.

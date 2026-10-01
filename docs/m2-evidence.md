@@ -136,7 +136,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | R3 not run; no isolated fault environment is provisioned or authorized. | Owner approval, harness implementation/verification, execution and durable-storage evidence required. |
+| T30 | BLOCKED | Bounded R3 harness and standard-runner execution now authorized; validation and matrix not yet run. | Harness gates and exact executed storage-fault evidence are still required. |
 
 ## Failure points and observation
 
@@ -165,27 +165,57 @@ recovery checks use integrity/FK checks, chain/head/snapshot/audit linkage and r
 results. Counts alone are not used as proof of atomicity. No test disables guards
 on ordinary paths; impossible-state/limit fixtures are explicitly isolated.
 
-## Open R3 gate and proposed setup
+## Bounded R3 authorization and execution status
 
-Proposed method: a dedicated test executable with a test-only SQLite VFS wrapping
-the same bundled SQLite 3.53.4 build. Run it inside an isolated disposable Linux
-VM with a dedicated scratch volume. The VFS maintains a deterministic virtual
-persistent image and volatile writes; controls cover xWrite, xSync, xTruncate,
-WAL/checkpoint writes, injected IOERR/FULL, and discard/reorder/torn writes at
-selected barriers. Recovery runs in a fresh process against the modeled durable
-image, with the normal WAL/FULL/FK settings. Keep an external acknowledgement
-ledger so acknowledged effects must survive, while ambiguous effects may be wholly
-present or wholly absent. Compare every store, exact JSON and schema pair, history
-chains and linkage; include migration, commit and checkpoint schedules. Validate
-the harness using known fault schedules before relying on it.
+The owner authorized a test-only VFS harness against application candidate
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`, with at most two sequential standard
+public-repository GitHub-hosted Ubuntu 24.04 jobs, 60 minutes each, 4 GiB modeled
+scratch and a 2 GiB free-space reserve. Paid usage is limited to $0. No artifacts
+or caches are uploaded; sanitized manifests, hashes and results stay in job logs.
+This replaces the earlier proposal's unapproved VM/scratch-volume setup with the
+existing hosted-runner service. No personal VM or host storage faults are used.
 
-This is a concrete proposed method, not an implemented or approved harness. It
-requires separate owner approval to provision/use the isolated VM and scratch
-storage, build the test-only VFS integration, and run the fault matrix. It must
-never fill a real disk, touch personal/runtime databases, reboot the user's
-machine, or treat process kill/SQL-error tests as proof of durable media behavior.
-No setup or R3 execution occurred in this change. T18 remains partial, T30 blocked,
-and overall M2 acceptance remains pending until the required evidence exists.
+The harness is implemented under `internal/r3` and requires the explicit `r3`
+build tag. The ordinary application has no VFS controls. A wrapper intercepts the
+pinned bundled SQLite's actual write/sync/truncate operations while the test
+worker calls the existing engine and migration paths. A separate Python controller
+reconstructs modeled durable images from the I/O trace and checks complete state
+and replay in fresh worker processes. Exact candidate-source equality is checked
+in the workflow; the harness SHA, amalgamation/header hashes, build environment,
+SQLite source ID/options, settings, target positions and seeds are logged.
+
+**Current result: NOT RUN. Harness validation is pending; T18 remains PARTIAL and
+T30 remains BLOCKED pending validation and executed coverage.** No application
+acceptance run may start unless the storage-model, native-VFS, native-application
+control and deliberate corruption controls all pass. No result below is inferred
+from compiling the harness.
+
+The declared `write-back-v1` model maintains live and durable file images. Successful
+file sync persists that file's bytes/length and creation; syncDir deletion persists
+the namespace removal. It does not silently sync another file. Unsynced writes can
+be retained, discarded, reordered within namespace/truncation epochs, or torn
+within their addressed byte range; no collateral corruption of bytes outside that
+write is modeled. Earlier syncs cannot be undone except by later modeled writes.
+Returned IOERR/FULL/partial-write errors are a separate schedule axis. Shared-memory
+indexes are volatile and rebuilt. Profiles report 512/4096-byte sectors and no
+atomic-write/safe-append/powersafe-overwrite capabilities. Results cannot establish
+physical hardware, filesystem or dishonest-flush durability.
+
+The bounded matrix selects the first/middle/last observed positions for each
+application phase, file role and semantic I/O category, logs the exact mandatory
+positions, and uses discard/retain plus reorder/torn seeds 17, 29 and 101. It covers
+create, data/metadata PATCH, archive/unarchive, no-op, restore, explicit TRUNCATE
+checkpoint, default automatic checkpoint/WAL reset, fresh initialization and actual
+M1-binary adoption. Missing targets, trace drift, untraced file changes, failed
+negative controls, timeout or resource exhaustion fail the gate. This is bounded
+sampling, not exhaustive enumeration of every possible storage schedule.
+
+The acknowledgement ledger is outside the modeled fault domain and is flushed
+only after complete successful response receipt. Test children are terminated
+without cleanup; only the modeled image is materialized for recovery. The first
+recovery connection uses the bundled SQLite and inspects state before migration
+retry, then the full oracle and repeated same-key requests check survival and no
+duplicate effects. No normal parent close/checkpoint is used as crash evidence.
 
 ## Review boundary
 
