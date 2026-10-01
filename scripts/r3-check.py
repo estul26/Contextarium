@@ -14,7 +14,6 @@ import selectors
 import shutil
 import signal
 import socket
-import sqlite3
 import subprocess
 import tempfile
 import time
@@ -658,10 +657,13 @@ def replay(worker, root, path, before, request, acks, m2schema):
     again=[json.loads(line) for line in run(worker,'-root',path,'-mode','retry','-input',config).splitlines()]
     require(responses==again and inspect(worker,path)==after,'second replay changed result/stores')
 
-def expect_reject(name, callback):
+def expect_reject(name, reason, callback):
     try: callback()
-    except (AssertionError, subprocess.CalledProcessError, KeyError, ValueError, StopIteration):
-        log(kind='negative-control',name=name,result='PASS');return
+    except AssertionError as exc:
+        # A timeout, worker failure, parser bug, or different invariant failure
+        # must never count as detection of the deliberately incorrect outcome.
+        require(str(exc)==reason,'negative control rejected for an unexpected reason')
+        log(kind='negative-control',name=name,result='PASS',rejection=reason);return
     raise AssertionError('negative control failed to reject: '+name)
 
 def model_validation():
@@ -672,7 +674,7 @@ def model_validation():
         m.consume(event('write',hex='616263646566',applied=6))
         require(m.live['store.db']==b'abcdef' and 'store.db' not in m.crash('discard',17),'volatile visibility/create')
         m.consume(event('sync'))
-        require(m.crash('discard',17)['store.db']==b'abcdef','successful sync persistence')
+        require(m.crash('discard',17).get('store.db')==b'abcdef','successful sync persistence')
         m.consume(event('write',offset=2,hex='58595a',applied=3))
         require(m.live['store.db']==b'abXYZf','overwrite visibility')
         m.consume(event('sync',rc=10,applied=0))
@@ -693,7 +695,7 @@ def model_validation():
         def consume(self,e):
             if e['op']=='sync': return
             super().consume(e)
-    expect_reject('incorrect-sync-semantics',lambda:check(BrokenSync))
+    expect_reject('incorrect-sync-semantics','successful sync persistence',lambda:check(BrokenSync))
     log(kind='validation',name='independent-storage-model',result='PASS')
 
 def raw_validation(worker,root):
@@ -774,20 +776,33 @@ def select_targets(events,operation):
     return sorted(result,key=lambda v:v[1]['seq'])
 
 def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
-    expect_reject('lost-acknowledged-mutation',lambda:oracle(before,before,request,ack,m2schema))
-    for name,statement in (
-        ('broken-audit-linkage','DROP TRIGGER mutation_audit_no_delete; DELETE FROM mutation_audit WHERE rowid=(SELECT max(rowid) FROM mutation_audit);'),
-        ('broken-revision-linkage','DROP TRIGGER record_revisions_no_delete; DELETE FROM record_revisions WHERE rowid=(SELECT max(rowid) FROM record_revisions);'),
-        ('broken-idempotency-linkage',"UPDATE idempotency_keys SET response='{}' WHERE key='r3-change';"),
+    # Inspect one fresh positive image first. Only copies of its observed oracle
+    # input are corrupted; a failed inspector cannot masquerade as rejection.
+    path=materialize(root,'negative-positive-control',image)
+    observed=inspect(worker,path)
+    require(observed==after,'negative-control positive inspection changed state')
+    require(oracle(before,observed,request,ack,m2schema)=='present','negative-control positive oracle failed')
+    remove_owned(root,path)
+    expect_reject('lost-acknowledged-mutation','acknowledged mutation lost/changed',
+                  lambda:oracle(before,before,request,ack,m2schema))
+    for name,reason in (
+        ('broken-audit-linkage','event/revision pair'),
+        ('broken-revision-linkage','head/snapshot mismatch'),
+        ('broken-idempotency-linkage','idempotency revision absent'),
     ):
-        path=materialize(root,'negative',image)
-        # Explicit negative-control fixture only; production guards never change.
-        with sqlite3.connect(path/'store.db') as db:db.executescript(statement)
-        def rejected():
-            state=inspect(worker,path)
-            oracle(before,state,request,ack,m2schema)
-        expect_reject(name,rejected)
-        remove_owned(root,path)
+        bad=copy.deepcopy(observed)
+        if name=='broken-audit-linkage':
+            bad['mutation_audit'][-1]['revision_number']+=100
+        elif name=='broken-revision-linkage':
+            current=bad['records'][0]
+            head=next(v for v in bad['record_revisions'] if v['record_id']==current['id'] and v['revision_number']==current['revision'])
+            head['data']='{"deliberately":"broken"}'
+        else:
+            key=next(k for k in bad['idempotency_keys'] if k['key']==request['Key'])
+            response=precise(key['response']);response['revision']=('number','999999999')
+            key['response']=canonical(response)
+        expect_reject(name,reason,lambda:oracle(before,bad,request,ack,m2schema))
+    require(oracle(before,observed,request,ack,m2schema)=='present','negative controls modified positive state')
     log(kind='validation',name='oracle-negative-controls',result='PASS')
 
 def no_fault_diagnostic(worker, root):
