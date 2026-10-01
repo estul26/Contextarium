@@ -65,8 +65,8 @@ static const char* semantic(const char *op,const char *name,sqlite3_int64 off,in
 static void decide(long id,const char *op,const char *name,sqlite3_int64 off,int n,int flags,const void *data) {
  if(target || !strcmp(fault,"none")) return;
  /* One pending I/O at a time. The controller verifies its planned descriptor
-  * and semantic-group prefix before replying. An EOF/bad/stale reply exits
-  * without performing this operation or injecting a fault elsewhere. */
+  * and Nth stable-selector group position before replying. An EOF/bad/stale
+  * reply exits without performing this operation or injecting a fault elsewhere. */
  if(printf("{\"kind\":\"io-candidate\",\"seq\":%ld,\"phase\":\"%s\",\"op\":\"%s\",\"name\":\"%s\",\"role\":\"%s\",\"meaning\":\"%s\",\"offset\":%lld,\"length\":%d,\"flags\":%d}\n",
     id,phase,op,name,role(name),semantic(op,name,off,n,data),(long long)off,n,flags)<0 || fflush(stdout)) die("protocol-write");
  char reply[64];size_t used=0;

@@ -521,12 +521,14 @@ def inspect(worker, path):
 
 # Discovery keeps the approved first/middle/last samples. Sequence numbers only
 # identify trace rows. Full descriptors remain evidence; only the explicitly
-# projected selector and ordered semantic-group position identify a target.
+# projected selector and Nth member of that exact selector group identify a target.
 TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags')
-TARGET_POLICY = 'semantic-position-wal-geometry-v2'
+TARGET_POLICY = 'stable-selector-group-nth-v3'
 FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
 REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
                        'checkpoint','autocheckpoint','migration','fresh','empty-m1')
+MATRIX_ORDER = ('checkpoint','autocheckpoint','restore','migration','fresh','empty-m1',
+                'noop','create','patch','metadata','archive','unarchive')
 RECOVERY_SCHEDULES = (('discard',17),('retain',17),('reorder-torn',17),
                       ('reorder-torn',29),('reorder-torn',101))
 
@@ -582,21 +584,25 @@ def target_selector(descriptor):
 
 
 def target_group(descriptor):
-    return tuple(descriptor[k] for k in ('phase','role','meaning'))
+    """Canonical selector items are the sole discovery AND live group key.
+
+    Positive WAL append offset is excluded only by target_selector; all other
+    selector fields, including exact length/flags and strict offsets, remain.
+    """
+    return tuple(sorted(target_selector(descriptor).items()))
 
 
 def make_target(items, index, samples):
-    baseline=[dict(event_descriptor(e),seq=e['seq']) for e in items[:index+1]]
-    prefix=[target_selector(e) for e in baseline]
-    return {'descriptor':event_descriptor(items[index]), 'selector':prefix[-1],
-            'prefix':prefix, 'baseline_prefix':baseline, 'samples':samples,
+    require(items and type(index) is int and 0<=index<len(items),'invalid target position')
+    descriptor=event_descriptor(items[index]);group=target_group(descriptor)
+    require(all(target_group(event_descriptor(e))==group for e in items),'mixed target selector group')
+    return {'descriptor':descriptor, 'selector':target_selector(descriptor), 'samples':samples,
             'group_position':index+1,'group_count':len(items),'baseline_seq':items[index]['seq']}
 
 
 def target_summary(plan):
     return {k:plan[k] for k in ('descriptor','selector','samples','group_position','group_count','baseline_seq')} | {
-        'identity_policy':TARGET_POLICY,'prefix_sha256':digest(encoded(plan['prefix'])),
-        'baseline_prefix_sha256':digest(encoded(plan['baseline_prefix']))}
+        'identity_policy':TARGET_POLICY}
 
 
 def target_evidence(plan, event):
@@ -607,25 +613,27 @@ def target_evidence(plan, event):
 
 
 class TargetMatcher:
-    """Strict ordered prefix within ONE discovered phase/role/semantic group.
+    """Select the Nth live member of ONE complete stable-selector class.
 
-    Other groups may change length. Each selected-group member must match its
-    stable selector/shape before advancing the explicit position. Changed shape,
-    order or strict offset fails. Identical selectors (including WAL writes at
-    different positive offsets) are indistinguishable and resolved by Nth group
-    position; insertion/removal of such members cannot be detected as identity.
-    First/middle/last refer to the recorded no-fault discovery group, not a
-    promise about the suffix of an execution altered by the injected failure.
+    Other selector shapes never advance this group or authorize injection.
+    Members within this group are intentionally indistinguishable: adding or
+    removing one changes positions and cannot reveal a hidden page/transaction
+    identity. Missing N fails. Discovery count/first-middle-last labels and full
+    baseline geometry are evidence, not requirements on the live trace suffix.
+    No prefix comparison, search ahead, retry or physical-address substitution.
     """
     def __init__(self, plan):
         self.plan=plan;self.group=target_group(plan['descriptor']);self.seen=0
         self.last_seq=0;self.last_observed=[];self.selected_seq=None
         self.selected_descriptor=None;self.geometry_change=None
-        self.trace_verified=False;self.decision_sent=False;self.ack_before_fault=0
-        require(plan['prefix'] and plan['prefix'][-1]==plan['selector'] and
-                target_selector(plan['descriptor'])==plan['selector'] and
-                len(plan['prefix'])==len(plan['baseline_prefix'])==plan['group_position'],
-                'invalid target prefix')
+        self.alternates={};self.alternate_events=0;self.unlisted_alternate_events=0
+        self.trace_verified=False;self.decision_sent=False;self.reached=False;self.ack_before_fault=0
+        require(target_selector(plan['descriptor'])==plan['selector'] and
+                type(plan['group_position']) is int and type(plan['group_count']) is int and
+                1<=plan['group_position']<=plan['group_count'] and
+                type(plan['baseline_seq']) is int and plan['baseline_seq']>0 and
+                plan['samples'] and all(s in ('first','middle','last') for s in plan['samples']),
+                'invalid target group plan')
 
     def observe(self, event):
         require(self.selected_seq is None,'repeated target decision')
@@ -633,31 +641,48 @@ class TargetMatcher:
         self.geometry_change=None
         require(type(event['seq']) is int and event['seq']>self.last_seq,'decision sequence not increasing')
         self.last_seq=event['seq']
-        self.last_observed=(self.last_observed+[dict(descriptor,seq=event['seq'])])[-8:]
-        if target_group(descriptor)!=self.group:return False
-        expected=self.plan['prefix'][self.seen]
-        require(target_selector(descriptor)==expected,'required target group prefix changed')
-        baseline=self.plan['baseline_prefix'][self.seen]
-        if descriptor['offset']!=baseline['offset']:
-            self.geometry_change={'group_position':self.seen+1,'baseline':baseline,
-                                  'observed':dict(descriptor,seq=event['seq'])}
+        observed=dict(descriptor,seq=event['seq'])
+        self.last_observed=(self.last_observed+[observed])[-8:]
+        group=target_group(descriptor)
+        if group!=self.group:
+            # Relevant alternatives share phase OR file. Bound shape storage;
+            # overflow is explicit, never silently presented as a full census.
+            if (descriptor['phase']==self.plan['descriptor']['phase'] or
+                    descriptor['name']==self.plan['descriptor']['name']):
+                self.alternate_events+=1
+                if group in self.alternates:
+                    self.alternates[group]['count']+=1
+                    self.alternates[group]['last_observed']=observed
+                elif len(self.alternates)<8:
+                    self.alternates[group]={'selector':target_selector(descriptor),'count':1,
+                                            'last_observed':observed}
+                else:self.unlisted_alternate_events+=1
+            return False
         self.seen+=1
-        if self.seen!=len(self.plan['prefix']):return False
+        if self.seen!=self.plan['group_position']:return False
+        baseline=dict(self.plan['descriptor'],seq=self.plan['baseline_seq'])
+        if descriptor['offset']!=baseline['offset']:
+            self.geometry_change={'group_position':self.seen,'baseline':baseline,'observed':observed}
         self.selected_seq=event['seq']
         self.selected_descriptor=descriptor
         return True
 
     def require_reached(self, hit):
-        require(self.trace_verified and self.decision_sent and hit is not None and
-                hit['seq']==self.selected_seq,'required descriptor target not reached')
+        self.reached=(self.trace_verified and self.decision_sent and hit is not None and
+                      hit['seq']==self.selected_seq)
+        require(self.reached,'required descriptor target not reached')
 
     def diagnostics(self):
-        return {'planned':target_summary(self.plan),'observed_group_prefix_count':self.seen,
+        return {'planned':target_summary(self.plan),'matching_live_group_members':self.seen,
+                'relevant_alternate_scope':'same-phase-or-file','relevant_alternate_events':self.alternate_events,
+                'alternate_selectors':list(self.alternates.values()),
+                'unlisted_alternate_events':self.unlisted_alternate_events,
                 'last_observed':self.last_observed,'selected_seq':self.selected_seq,
                 'selected_observed':dict(self.selected_descriptor,seq=self.selected_seq) if self.selected_descriptor else None,
                 'last_geometry_change':self.geometry_change,
                 'trace_verified_before_decision':self.trace_verified,
-                'decision_sent':self.decision_sent,'acknowledged_before_fault':self.ack_before_fault}
+                'decision_sent':self.decision_sent,'target_reached':self.reached,
+                'acknowledged_before_fault':self.ack_before_fault}
 
 
 def verify_pending_trace(trace, event):
@@ -673,9 +698,9 @@ def verify_pending_trace(trace, event):
 
 
 def decide_io(stream, trace, matcher, event, acknowledgements):
-    inject=matcher.observe(event)  # Any mismatch raises BEFORE a command is sent.
+    inject=matcher.observe(event)  # Only this exact selector group and Nth position may inject.
     if matcher.geometry_change is not None:
-        # Safe metadata for every changed prefix member, before any reply. This
+        # Safe metadata for the selected member, before any reply. This
         # is a selector match, not proof of private-trace verification/injection.
         log(kind='target-geometry',identity_policy=TARGET_POLICY,
             target_baseline_seq=matcher.plan['baseline_seq'],
@@ -1213,8 +1238,7 @@ def select_targets(events,operation):
     groups={}
     for e in events:
         if e['op'] not in ('write','sync','truncate') or e['phase']=='open':continue
-        meaning=event_descriptor(e)['meaning']
-        key=(e['phase'],e['role'],meaning)
+        key=target_group(event_descriptor(e))
         groups.setdefault(key,[]).append(e)
     result=[]
     for key,items in groups.items():
@@ -1222,14 +1246,24 @@ def select_targets(events,operation):
         for i in sorted(set(positions.values())):
             result.append((key,make_target(items,i,[name for name,j in positions.items() if i==j])))
     require(result,'no targets discovered')
-    require(any(k[1]=='wal' and k[2]=='sync' for k in groups),'WAL sync not observed')
+    descriptors=[p['descriptor'] for _,p in result]
+    require(any(d['role']=='wal' and d['meaning']=='sync' for d in descriptors),'WAL sync not observed')
     if operation in ('checkpoint','autocheckpoint'):
-        require(any(k[1]=='database' and k[2]=='write' for k in groups),'checkpoint database writes not observed')
-        require(any(k[1]=='database' and k[2]=='sync' for k in groups),'checkpoint database sync not observed')
+        require(any(d['role']=='database' and d['meaning']=='write' for d in descriptors),'checkpoint database writes not observed')
+        require(any(d['role']=='database' and d['meaning']=='sync' for d in descriptors),'checkpoint database sync not observed')
     if operation=='autocheckpoint':require(sum(e['op']=='write' and e['role']=='wal' and e['offset']==0 for e in events)>=2,'WAL reset after automatic checkpoint missing')
-    if operation=='checkpoint':require(any(k[1]=='wal' and k[2]=='truncate' for k in groups),'WAL truncation missing')
-    require(any(k[2]=='wal-commit-marker' for k in groups),'commit marker not identified')
+    if operation=='checkpoint':require(any(d['role']=='wal' and d['meaning']=='truncate' for d in descriptors),'WAL truncation missing')
+    require(any(d['meaning']=='wal-commit-marker' for d in descriptors),'commit marker not identified')
     return sorted(result,key=lambda v:v[1]['baseline_seq'])
+
+def matrix_requests(requests):
+    # Order only: keep prerequisite create controls above this call and retain
+    # every required family. No historical run contributes to fresh accounting.
+    by_operation={request['Operation']:request for request in requests}
+    require(len(by_operation)==len(requests) and set(by_operation)==set(MATRIX_ORDER)==set(REQUIRED_OPERATIONS),
+            'matrix operation families missing or duplicated')
+    return [by_operation[operation] for operation in MATRIX_ORDER]
+
 
 def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
     # Inspect one fresh positive image first. Only copies of its observed oracle
@@ -1339,7 +1373,7 @@ def main():
     emptyold=owned(root,'empty-m1');m1_fixture(m1,emptyold,empty=True);emptystate=inspect(worker,emptyold);emptyimage=image_files(emptyold)
     requests += [{'Operation':'migration','Body':'{}','Legacy':legacy},{'Operation':'fresh','Body':'{}'},{'Operation':'empty-m1','Body':'{}'}]
     cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256();acceptance=AcceptanceCoverage()
-    for request in requests:
+    for request in matrix_requests(requests):
         op=request['Operation'];seedstate=oldstate if op=='migration' else before;seedimage=oldimage if op=='migration' else initial
         if op=='empty-m1':seedstate,seedimage=emptystate,emptyimage
         if op=='fresh':
@@ -1355,7 +1389,7 @@ def main():
             targets=select_targets(base['events'],op)
             acceptance.plan(op,sector,targets)
             log(kind='schedule',operation=op,sector=sector,
-                selection='discovery first-middle-last; stable selector/shape and ordered group prefix before injection; exact live private trace; no substitution',
+                selection='discovery first-middle-last per stable selector group; Nth live member before injection; exact live private trace; no substitution',
                 targets=[target_summary(p) for _,p in targets])
             for key,target in targets:
                 for fault in fault_modes(target):
@@ -1375,7 +1409,7 @@ def main():
                         results.append(item);recoveries+=1;remove_owned(root,p)
                     report={'kind':'case','case':case,'phase':reached['phase'],'role':reached['role'],'op':reached['op'],'offset':reached['offset'],'length':reached['length'],'occurrence':reached['seq'],**evidence,'acknowledged_before_fault':got['ack_before_fault'],'trace_sha256':got['trace_sha256'],'ledger_sha256':got['ack_sha256'],'acknowledged':len(got['ack']),'results':results,'result':'PASS'}
                     acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
-                    log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],key[2],fault))
+                    log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],target['descriptor']['meaning'],fault))
     acceptance.require_complete()
     log(kind='FINAL',harness_validation='PASS',T18='PASS',T30='PASS',R3='PASS within write-back-v1 model',cases=cases,recoveries=recoveries,coverage=sorted(coverage),manifest_sha256=manifest.hexdigest(),artifact_upload=False,paid_usage_authorized=0)
     # Only the marked, test-created root is removed, after results/hashes were logged.

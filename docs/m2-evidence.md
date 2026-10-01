@@ -16,6 +16,10 @@ stable-prefix check after 399 cases / 1,995 recoveries. T18 PARTIAL, T30 BLOCKED
 D6/R3 OPEN; all seven slots consumed. Earlier source-review/run records below
 retain their historical checkpoint status.
 
+Latest source-only proposal: [target grouping v3](#target-grouping-v3--source-review-only).
+Its 52 prepared targeting tests and all runtime behavior are **NOT RUN** at this
+revision. Historical passing tests above apply to the seventh run's source only.
+
 ## Execution boundary
 
 Validation date: 2026-09-30. Local platform: macOS / darwin arm64, Go 1.26.2,
@@ -1348,6 +1352,129 @@ preserved. Ordinary [CI 36880305839](https://github.com/estul26/Contextarium/act
 passed at the workflow commit; it is separate from R3 evidence. The reporting SHA
 is recorded in PR #6. Architecture deviations: **NONE**. No owner acceptance,
 merge, deployment or M3. **Additional execution slots: ZERO.**
+
+## Target grouping v3 — source review only
+
+Prepared from reporting checkpoint `8b9327d4692319e46cfee9608646c168bef5ead0`.
+The containing commit and PR identify the new source-review candidate; it has
+**not** been executed. Application source remains equal to
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`. Last executed harness remains
+`9be4ed2d87abbfce968dcb737338dc2554878229`.
+
+Source confirms that the previous discovery key `(phase, role, meaning)` could
+combine multiple distinct selectors (including different lengths or flags),
+while the matcher compared their ordered selector prefix. This grouping mismatch
+is corrected below. The seventh run's **399 cases / 1,995 recoveries** remain
+historical partial evidence with their original source, schedules and hashes.
+`noop-s512-b44-full` remains **failed before injection**: no injection/recovery
+result exists for it. The expected intermediate prefix member was not retained;
+the final target's 4,072-byte descriptor cannot establish which field differed
+at that intermediate position. Neither that field nor the source of historical
+trace variation is proven by this source change.
+
+### One selector class per group
+
+Policy identifier: `stable-selector-group-nth-v3`. Both discovery and live
+matching call `target_group`, defined as the sorted key/value tuple of the
+**same existing `target_selector` projection** used to authorize injection:
+
+| Operation class | Stable group identity |
+| --- | --- |
+| Positive WAL append write (`wal-frame` or `wal-commit-marker`) | phase, name/file, role, op, meaning, length, flags, offset_policy=`positive-wal-append`; positive physical offset excluded |
+| All strict classes | phase, name/file, role, op, meaning, length, flags, offset_policy=`exact`, exact offset |
+
+Strict classes include WAL header reset at offset zero, truncate's exact
+requested size in `offset`, database/journal writes at exact offsets, and sync's
+exact offset/length/flags. Commit markers still require 24 bytes. No global
+length, flag or offset relaxation is introduced. A mixed-class discovery plan
+is rejected. The C change only updates the decision-protocol comment.
+
+Discovery retains first/middle/last at positions `1`, `floor(count/2)+1`, and
+`count` **within every stable selector class**, coalescing duplicate positions
+while retaining every applicable label. Splitting the former coarse groups can
+increase the selected target count; no family or first/middle/last label is
+removed. This is a documented change to bounded sampling, not exhaustive
+coverage or a promise that a future execution will finish within an allowance.
+
+The matcher selects the **Nth live member of the planned selector group**.
+Other shapes receive only a continue reply, do not advance N, and cannot cause
+a prefix mismatch. Missing N still fails. Indistinguishable members have only
+ordered position as identity; insertion/removal within the exact same class can
+change which occurrence occupies N. There is no search ahead, retry, nearest
+address or skip-to-PASS. Baseline sequence, full geometry, group count and sample
+labels remain evidence, not a constraint on the live suffix.
+
+Before an inject reply, the exact selector and Nth position must match, followed
+by the unchanged private pre-trace check against the **live** sequence, actual
+offset, length, flags and byte-derived meaning. The post-trace still checks the
+selected live descriptor exactly. A permitted WAL offset difference is recorded
+with both full baseline and live descriptors; it does not bypass private-trace
+verification.
+
+Failure logs retain the planned selector, full baseline descriptor/sequence,
+position/count/labels, matching-live count, last eight candidate descriptors,
+selected descriptor and trace/decision/reached flags. Relevant alternative
+shapes (same phase **or** file) retain at most eight selector/count/last-descriptor
+entries, with a total event count and explicit unlisted-event overflow count.
+The existing outer failure record retains the complete acknowledgement count;
+target diagnostics also retain acknowledged-before-fault count. Values are
+allowlisted labels and integers, without page bytes, SQL, request bodies,
+arbitrary exception text, credentials or private paths. Prefix hashes no longer
+stand in for observable selector fields.
+
+### Future order and unchanged acceptance
+
+After the existing prerequisites and both real M1 fixtures, future matrix order
+is: **explicit checkpoint → automatic checkpoint/WAL reset → restore → M1
+migration/adoption → fresh initialization → empty-M1 initialization → no-op →
+create → data PATCH → metadata PATCH → archive → unarchive**. Prerequisite
+create controls and request objects remain unchanged. Ordering rejects missing
+or duplicate families.
+
+Final PASS still requires all 12 operation families, both 512/4,096 sector
+models, every selected target/compatible fault mode, and all five recovery
+schedules: discard/17, retain/17, reorder-torn/17, /29 and /101. The existing
+newly acknowledged-effect guards remain unchanged. A complete successful
+response must be received and fsynced in the external ledger before the relevant
+fault; a commit marker is not an acknowledgement. Each invocation starts fresh
+accounting; fifth/sixth/seventh results cannot fill future candidate coverage.
+Model, successful-sync guarantees, oracle, replay and completeness semantics
+are unchanged.
+
+### Prepared regression source and static checks
+
+The targeting file contains **52 test methods, NOT RUN** at this candidate,
+including separate frame-header/page-data/commit groups, positive WAL geometry,
+strict length/flags/database/journal/sync/truncate/header identities, mixed-plan
+rejection, Nth/missing-N selection, exact private pre-trace checks, bounded safe
+selector diagnostics, first/middle/last labels and matrix order. The existing
+acknowledgement/completeness test methods remain unchanged. The 16 fixture tests
+are unchanged and also **NOT RUN** in this source-only pass.
+
+Executed static checks only:
+
+- Python `ast.parse` on controller, targeting tests and unchanged fixture tests;
+  structural comparison against the reporting checkpoint confirmed protected
+  model/oracle/replay/selector/trace/ledger/acceptance definitions unchanged.
+- `gofmt -l internal/r3`: no output.
+- `cc -fsyntax-only` for `internal/r3/vfs/vfs.c`, using the cached pinned
+  go-sqlite3 v1.14.52 bundled SQLite header (SHA-256
+  `4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f`).
+- Whitespace, scope and public-content review; production source equality,
+  dependencies, contracts and all workflow gates unchanged.
+
+No tests, controller import/execution, harness build, fixture binary, probe,
+negative control, fault schedule or dedicated Actions job ran. Ordinary PR CI
+may run automatically and supplies no R3 validation. The original disabled
+workflow and every consumed one-shot workflow are unchanged.
+
+Remaining gaps include complete no-op coverage, restore, migration/adoption,
+fresh/empty-M1 initialization, checkpoint/database writes/sync/truncation/WAL
+reset and survival of newly acknowledged effects. All 399 seventh-run completed
+cases had zero acknowledgements; that remains an acceptance gap. V3 grouping,
+prepared tests and revised ordering require separately authorized execution.
+**T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
+additional execution slots ZERO.** Architecture deviations: **NONE**.
 
 ## Review boundary
 

@@ -74,22 +74,16 @@ class TargetingTests(unittest.TestCase):
         self.assert_unrelated(self.event(47,commit=False))
 
     def test_changed_range_follows_explicit_file_policy(self):
-        # Replaces the former blanket range rejection, preserving strict ranges
-        # for database/journal writes while explicitly allowing WAL geometry.
         for name,allowed in [('store.db-wal',True),('store.db',False),('store.db-journal',False)]:
             with self.subTest(name=name):
-                self.sink=io.BytesIO()
-                original=self.event(name=name)
+                self.sink=io.BytesIO();original=self.event(name=name)
                 matcher=self.c.TargetMatcher(self.plan([original]))
-                changed=dict(original,offset=90000)
-                if allowed:
-                    self.deliver(matcher,changed)
-                    self.assertEqual(self.sink.getvalue(),b'i 47\n')
-                else:
-                    with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-                        self.deliver(matcher,changed)
-                    self.assertEqual(self.sink.getvalue(),b'')
-                    self.assertFalse(matcher.decision_sent)
+                self.deliver(matcher,dict(original,offset=90000))
+                self.assertEqual(self.sink.getvalue(),b'i 47\n' if allowed else b'c 47\n')
+                self.assertEqual(matcher.seen,int(allowed))
+                if not allowed:
+                    with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+                        matcher.require_reached(None)
 
     def test_first_commit_marker_at_different_append_offset_is_selected(self):
         plan=self.plan([self.event(39,offset=70072),self.event(41,offset=74192),
@@ -133,16 +127,20 @@ class TargetingTests(unittest.TestCase):
     def test_wrong_file_with_same_role_never_receives_injection(self):
         plan=self.plan([self.event(name='store.db',length=4096)])
         matcher=self.c.TargetMatcher(plan)
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,self.event(name='probe.db',length=4096))
-        self.assertEqual(self.sink.getvalue(),b'')
+        self.deliver(matcher,self.event(name='probe.db',length=4096))
+        self.assertEqual(self.sink.getvalue(),b'c 47\n')
+        self.assertEqual(matcher.seen,0)
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
 
-    def test_incompatible_append_length_fails_before_injection(self):
+    def test_different_append_length_is_a_different_group(self):
         plan=self.plan([self.event(length=4096,commit=False)])
         matcher=self.c.TargetMatcher(plan)
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,self.event(offset=90000,length=2048,commit=False))
-        self.assertEqual(self.sink.getvalue(),b'')
+        self.deliver(matcher,self.event(offset=90000,length=2048,commit=False))
+        self.assertEqual(self.sink.getvalue(),b'c 47\n')
+        self.assertEqual(matcher.seen,0)
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
 
     def test_commit_marker_requires_24_byte_shape(self):
         matcher=self.c.TargetMatcher(self.plan());message=self.message(self.event())
@@ -169,33 +167,44 @@ class TargetingTests(unittest.TestCase):
     def test_truncate_size_remains_identity(self):
         event=self.event(op='truncate',offset=4096,length=0)
         matcher=self.c.TargetMatcher(self.plan([event]))
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,dict(event,offset=0))
-        self.assertEqual(self.sink.getvalue(),b'')
+        changed=dict(event,offset=0)
+        self.assertNotEqual(self.c.target_group(self.message(event)),self.c.target_group(self.message(changed)))
+        self.deliver(matcher,changed)
+        self.assertEqual(self.sink.getvalue(),b'c 47\n')
+        self.assertEqual(matcher.seen,0)
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
 
     def test_sync_flags_remain_identity(self):
         event=self.event(op='sync',offset=0,length=0,flags=2)
         matcher=self.c.TargetMatcher(self.plan([event]))
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,dict(event,flags=3))
-        self.assertEqual(self.sink.getvalue(),b'')
+        changed=dict(event,flags=3)
+        self.assertNotEqual(self.c.target_group(self.message(event)),self.c.target_group(self.message(changed)))
+        self.deliver(matcher,changed)
+        self.assertEqual(self.sink.getvalue(),b'c 47\n')
+        self.assertEqual(matcher.seen,0)
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
 
     def test_append_flags_remain_identity(self):
-        matcher=self.c.TargetMatcher(self.plan())
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,self.event(offset=90000,flags=1))
+        event=self.event()
+        matcher=self.c.TargetMatcher(self.plan([event]))
+        changed=dict(event,offset=90000,flags=1)
+        self.assertNotEqual(self.c.target_group(self.message(event)),self.c.target_group(self.message(changed)))
+        self.deliver(matcher,changed)
+        self.assertEqual(self.sink.getvalue(),b'c 47\n')
+        self.assertEqual(matcher.seen,0)
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
+
+    def test_mixed_selector_group_plan_is_rejected(self):
+        header=self.event(10,offset=4000,commit=False)
+        page=self.event(47,length=4096,commit=False)
+        with self.assertRaisesRegex(AssertionError,'mixed target selector group'):
+            self.plan([header,page],1)
         self.assertEqual(self.sink.getvalue(),b'')
 
-    def test_reordered_group_prefix_is_not_substituted(self):
-        # Stable shape, not geometry, distinguishes these prefix members.
-        first=self.event(10,offset=4000,commit=False)
-        last=self.event(47,length=4096,commit=False)
-        matcher=self.c.TargetMatcher(self.plan([first,last],1))
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,last)
-        self.assertEqual(self.sink.getvalue(),b'')
-
-    def test_append_prefix_accepts_geometry_but_enforces_ordered_position(self):
+    def test_append_group_accepts_geometry_but_enforces_nth_position(self):
         items=[self.event(10,offset=4000),self.event(47)]
         matcher=self.c.TargetMatcher(self.plan(items,1))
         self.deliver(matcher,self.event(20,offset=6000))
@@ -204,8 +213,8 @@ class TargetingTests(unittest.TestCase):
         self.deliver(matcher,self.event(80,offset=90000))
         self.assertEqual(self.sink.getvalue(),b'c 20\ni 80\n')
         self.assertEqual(matcher.seen,2)
-        self.assertEqual([c.kwargs['group_position'] for c in self.log.call_args_list],[1,2])
-        self.assertEqual([c.kwargs['baseline']['seq'] for c in self.log.call_args_list],[10,47])
+        self.assertEqual([c.kwargs['group_position'] for c in self.log.call_args_list],[2])
+        self.assertEqual([c.kwargs['baseline']['seq'] for c in self.log.call_args_list],[47])
 
     def test_indistinguishable_append_members_resolve_only_by_group_position(self):
         plan=self.plan([self.event(10,offset=4000),self.event(47)],1)
@@ -217,15 +226,17 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(self.sink.getvalue(),b'c 11\ni 12\n')
         self.assertEqual(matcher.selected_seq,12)
 
-    def test_removed_prefix_shape_cannot_skip_to_selected_member(self):
-        first=self.event(10,length=24,commit=False)
-        middle=self.event(20,length=4096,commit=False)
-        last=self.event(30,length=24,commit=False)
-        matcher=self.c.TargetMatcher(self.plan([first,middle,last],2))
-        self.deliver(matcher,first)
-        with self.assertRaisesRegex(AssertionError,'required target group prefix changed'):
-            self.deliver(matcher,last)
-        self.assertEqual(self.sink.getvalue(),b'c 10\n')
+    def test_missing_nth_member_fails_despite_other_shapes(self):
+        items=[self.event(10,length=4096),self.event(20,length=4096),self.event(30,length=4096)]
+        matcher=self.c.TargetMatcher(self.plan(items,2))
+        self.deliver(matcher,self.event(40,length=4096))
+        self.deliver(matcher,self.event(41,length=24,commit=False))
+        self.deliver(matcher,self.event(42,length=4096))
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
+        self.assertEqual(matcher.seen,2)
+        self.assertEqual(self.sink.getvalue(),b'c 40\nc 41\nc 42\n')
+        self.assertFalse(matcher.decision_sent)
 
     def test_descriptor_and_private_trace_verified_before_injection_command(self):
         matcher=self.c.TargetMatcher(self.plan());event=self.event(88,offset=90000)
@@ -287,7 +298,7 @@ class TargetingTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_SENTINEL',json.dumps(diagnostic))
         self.assertNotIn('hex',json.dumps(diagnostic))
 
-    def test_identical_descriptors_use_explicit_group_prefix_position(self):
+    def test_identical_descriptors_use_explicit_nth_group_position(self):
         first=self.event(4,op='sync',offset=0,length=0,flags=2)
         last=dict(first,seq=49)
         matcher=self.c.TargetMatcher(self.plan([first,last],1))
@@ -313,10 +324,10 @@ class TargetingTests(unittest.TestCase):
         frames=[self.event(i+10,offset=100+i*4096,length=4096,commit=False) for i in range(5)]
         sync=self.event(20,op='sync',offset=0,length=0,flags=2)
         targets=self.c.select_targets(frames+[sync,self.event(21)],'noop')
-        frame_plans=[p for key,p in targets if key[2]=='wal-frame']
+        frame_plans=[p for _,p in targets if p['descriptor']['meaning']=='wal-frame']
         self.assertEqual([p['baseline_seq'] for p in frame_plans],[10,12,14])
         self.assertEqual([p['samples'] for p in frame_plans],[['first'],['middle'],['last']])
-        self.assertEqual([len(p['prefix']) for p in frame_plans],[1,3,5])
+        self.assertEqual([p['group_position'] for p in frame_plans],[1,3,5])
         self.assertTrue(all(p['group_count']==5 for p in frame_plans))
 
     def test_single_member_group_retains_all_sample_labels(self):
@@ -326,6 +337,140 @@ class TargetingTests(unittest.TestCase):
     def test_required_commit_group_absent_fails_discovery(self):
         with self.assertRaisesRegex(AssertionError,'commit marker not identified'):
             self.c.select_targets([self.event(4,op='sync',offset=0,length=0)],'noop')
+
+    def test_extra_frame_header_does_not_disturb_page_write_group(self):
+        items=[self.event(10,length=4096),self.event(20,length=4096)]
+        matcher=self.c.TargetMatcher(self.plan(items,1))
+        for e in (self.event(31,length=24,commit=False),self.event(32,length=4096),
+                  self.event(33,length=24,commit=False),self.event(34,length=4096)):
+            self.deliver(matcher,e)
+        self.assertEqual(self.sink.getvalue(),b'c 31\nc 32\nc 33\ni 34\n')
+        self.assertEqual(matcher.seen,2)
+        self.assertEqual(matcher.diagnostics()['alternate_selectors'][0]['count'],2)
+
+    def test_extra_page_data_does_not_disturb_commit_marker_group(self):
+        matcher=self.c.TargetMatcher(self.plan([self.event(10),self.event(20)],1))
+        for e in (self.event(31,length=4096),self.event(32),
+                  self.event(33,length=4096),self.event(34)):
+            self.deliver(matcher,e)
+        self.assertEqual(self.sink.getvalue(),b'c 31\nc 32\nc 33\ni 34\n')
+        self.assertEqual(matcher.seen,2)
+
+    def test_group_key_is_exactly_the_selector_policy(self):
+        items=[self.event(),self.event(offset=99999),self.event(length=4096),
+               self.event(flags=1),self.event(offset=0,length=32),
+               self.event(name='store.db'),self.event(name='store.db-journal'),
+               self.event(op='truncate',offset=0,length=0),
+               self.event(op='sync',offset=0,length=0,flags=2)]
+        for e in items:
+            d=self.c.event_descriptor(e)
+            self.assertEqual(dict(self.c.target_group(d)),self.c.target_selector(d))
+        self.assertEqual(self.c.target_group(self.message(items[0])),self.c.target_group(self.message(items[1])))
+
+    def test_discovery_partitions_every_strict_shape_and_preserves_sample_labels(self):
+        # Five members per selector gives three distinct first/middle/last samples.
+        shapes=[dict(length=24,commit=False),dict(length=4096),dict(length=4096,flags=1),
+                dict(name='store.db',offset=0,length=4096),dict(name='store.db',offset=4096,length=4096),
+                dict(name='store.db-journal',offset=0),dict(name='store.db-journal',offset=24),
+                dict(op='truncate',offset=0,length=0),dict(op='truncate',offset=4096,length=0),
+                dict(offset=0,length=32),dict(op='sync',offset=0,length=0,flags=2),
+                dict(op='sync',offset=0,length=0,flags=3),dict(length=24,commit=True)]
+        events=[self.event(1+i*5+j,**shape) for i,shape in enumerate(shapes) for j in range(5)]
+        groups={}
+        for key,plan in self.c.select_targets(events,'noop'):
+            self.assertEqual(key,self.c.target_group(plan['descriptor']))
+            groups.setdefault(key,[]).append(plan)
+        self.assertEqual(len(groups),len(shapes))
+        for plans in groups.values():
+            self.assertEqual([p['group_position'] for p in plans],[1,3,5])
+            self.assertEqual([p['samples'] for p in plans],[['first'],['middle'],['last']])
+            self.assertTrue(all(p['group_count']==5 for p in plans))
+
+    def test_sync_offset_length_and_flags_each_remain_exact(self):
+        baseline=self.event(op='sync',offset=0,length=0,flags=2)
+        matcher=self.c.TargetMatcher(self.plan([baseline]))
+        for seq,change in enumerate(({'offset':1},{'length':1},{'flags':3}),start=1):
+            self.deliver(matcher,dict(baseline,seq=seq,**change))
+        self.assertEqual(matcher.seen,0)
+        self.assertEqual(self.sink.getvalue(),b'c 1\nc 2\nc 3\n')
+        self.deliver(matcher,dict(baseline,seq=4))
+        self.assertEqual(self.sink.getvalue(),b'c 1\nc 2\nc 3\ni 4\n')
+
+    def test_planned_group_selector_cannot_disagree_with_descriptor(self):
+        plan=self.plan();plan['selector']['flags']=1
+        with self.assertRaisesRegex(AssertionError,'invalid target group plan'):
+            self.c.TargetMatcher(plan)
+        self.assertEqual(self.sink.getvalue(),b'')
+
+    def test_private_trace_length_and_flags_must_match_live_before_injection(self):
+        for change in ({'length':2048},{'flags':1}):
+            with self.subTest(change=change):
+                self.sink=io.BytesIO();live=self.event(91,length=4096)
+                matcher=self.c.TargetMatcher(self.plan([live]))
+                self.trace.write_text(json.dumps(self.event(91,length=4096 if 'length' not in change else 2048,
+                                                           flags=change.get('flags',0)))+'\n')
+                with self.assertRaisesRegex(AssertionError,'pending trace descriptor mismatch'):
+                    self.c.decide_io(self.sink,self.trace,matcher,self.message(live),[])
+                self.assertEqual(self.sink.getvalue(),b'')
+                self.assertFalse(matcher.trace_verified)
+                self.assertFalse(matcher.decision_sent)
+
+    def test_missing_target_diagnostics_report_selectors_and_bounded_counts(self):
+        plan=self.plan([self.event(10,length=4096),self.event(20,length=4096)],1)
+        matcher=self.c.TargetMatcher(plan)
+        self.deliver(matcher,self.event(31,length=4096))
+        for seq in (32,33):self.deliver(matcher,self.event(seq,commit=False))
+        for seq in range(34,46):
+            event=self.event(seq,length=100+seq,commit=False)
+            msg=self.message(event);msg['secret']='PRIVATE_SENTINEL_DO_NOT_LOG'
+            self.c.decide_io(self.sink,self.trace,matcher,msg,[])
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
+        d=matcher.diagnostics();wire=json.dumps(d)
+        self.assertEqual(d['planned']['selector']['length'],4096)
+        self.assertEqual(d['planned']['group_position'],2)
+        self.assertEqual(d['planned']['group_count'],2)
+        self.assertEqual(d['planned']['samples'],['middle','last'])
+        self.assertEqual(d['planned']['baseline_seq'],20)
+        self.assertEqual(d['planned']['descriptor'],self.c.event_descriptor(self.event(20,length=4096)))
+        self.assertEqual(d['matching_live_group_members'],1)
+        self.assertEqual(d['relevant_alternate_events'],14)
+        self.assertEqual(len(d['alternate_selectors']),8)
+        self.assertEqual(d['alternate_selectors'][0]['selector']['length'],24)
+        self.assertEqual(d['alternate_selectors'][0]['count'],2)
+        self.assertEqual(d['unlisted_alternate_events'],5)
+        self.assertEqual(len(d['last_observed']),8)
+        self.assertEqual(d['last_observed'][-1]['seq'],45)
+        self.assertFalse(d['trace_verified_before_decision'])
+        self.assertFalse(d['decision_sent']);self.assertFalse(d['target_reached'])
+        self.assertEqual(d['acknowledged_before_fault'],0)
+        self.assertNotIn('PRIVATE_SENTINEL',wire);self.assertNotIn('hex',wire)
+        self.assertNotIn('prefix_sha256',wire)
+        self.assertLess(len(wire),12000)
+
+    def test_reached_flag_requires_verified_decision_and_exact_live_sequence(self):
+        matcher=self.c.TargetMatcher(self.plan());self.deliver(matcher,self.event(91))
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached({'seq':90})
+        self.assertFalse(matcher.diagnostics()['target_reached'])
+        matcher.require_reached({'seq':91})
+        self.assertTrue(matcher.diagnostics()['target_reached'])
+
+    def test_matrix_order_keeps_every_request_unchanged(self):
+        requests=[{'Operation':op,'sentinel':object()} for op in self.c.REQUIRED_OPERATIONS]
+        ordered=self.c.matrix_requests(requests)
+        self.assertEqual([r['Operation'] for r in ordered],
+            ['checkpoint','autocheckpoint','restore','migration','fresh','empty-m1',
+             'noop','create','patch','metadata','archive','unarchive'])
+        self.assertEqual({id(r) for r in ordered},{id(r) for r in requests})
+        self.assertEqual([r['Operation'] for r in requests],list(self.c.REQUIRED_OPERATIONS))
+
+    def test_matrix_order_rejects_missing_or_duplicate_families(self):
+        requests=[{'Operation':op} for op in self.c.REQUIRED_OPERATIONS]
+        for changed in (requests[:-1],requests+[requests[0]],requests[:-1]+[requests[0]]):
+            with self.subTest(count=len(changed)):
+                with self.assertRaisesRegex(AssertionError,'matrix operation families missing or duplicated'):
+                    self.c.matrix_requests(changed)
 
     def test_complete_response_is_fsynced_before_ack_can_arm_fault(self):
         acknowledgements=[];order=[]
