@@ -59,7 +59,7 @@ func TestHTTPRecordLifecycle(t *testing.T) {
 	if replay.ID != record.ID {
 		t.Fatal("HTTP replay duplicated record")
 	}
-	patched := responseData[engine.Record](t, request(s, "PATCH", "/api/v1/records/"+record.ID, "update", `{"data":{"title":"Example","done":true},"status":"archived"}`, nil), 200)
+	patched := responseData[engine.Record](t, request(s, "PATCH", "/api/v1/records/"+record.ID, "update", `{"base_revision":1,"data":{"title":"Example","done":true},"status":"archived"}`, nil), 200)
 	if patched.Status != "archived" {
 		t.Fatal("patch status failed")
 	}
@@ -81,7 +81,7 @@ func TestHTTPRecordLifecycle(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	for _, patch := range []string{`{"namespace":"other"}`, `{"subject_id":"other"}`, `{"schema_id":"other"}`, `{"data":{"title":"Example","done":"true"}}`} {
-		w := request(s, "PATCH", "/api/v1/records/"+record.ID, "invalid", patch, nil)
+		w := request(s, "PATCH", "/api/v1/records/"+record.ID, "invalid", `{"base_revision":2,`+patch[1:], nil)
 		if w.Code != 400 && w.Code != 422 {
 			t.Fatal("bad patch accepted", w.Code, w.Body.String())
 		}
@@ -181,7 +181,7 @@ func TestAPILoopbackHostForms(t *testing.T) {
 	for _, host := range []string{
 		"[2001:db8::1]", "[2001:db8::1]:8080", "[::]",
 		"[::1%lo0]", "[::1%lo0]:8080", "[[::1]]", "[::1", "[::1]extra",
-		"[localhost]", "[127.0.0.1]",
+		"[localhost]", "[127.0.0.1]", "localhost:", "localhost:abc", "127.0.0.1:65536", "[::1]:-1", "::1",
 	} {
 		t.Run("reject_"+host, func(t *testing.T) {
 			r := httptest.NewRequest("GET", "http://127.0.0.1/api/v1/records", nil)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/estul26/Contextarium/internal/config"
 	"github.com/estul26/Contextarium/internal/storage"
@@ -89,5 +90,40 @@ func TestListenerFailureClosesStartupResources(t *testing.T) {
 	}
 	if mode != "delete" {
 		t.Fatalf("could not acquire exclusive database access: journal mode = %q", mode)
+	}
+}
+
+func TestM2StartupDeadlineDuringStorageWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "synthetic.db")
+	db, err := storage.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	lock, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Rollback()
+	// The caller's shorter deadline is inherited by the same bounded startup
+	// context used by Run; no listener or ready log may precede migration.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	var logs bytes.Buffer
+	start := time.Now()
+	err = Run(ctx, config.Config{ListenAddr: "127.0.0.1:0", DBPath: path}, slog.New(slog.NewJSONHandler(&logs, nil)))
+	if err == nil || ctx.Err() == nil || time.Since(start) > 3*time.Second || strings.Contains(logs.String(), "application ready") {
+		t.Fatal("startup deadline failed", err)
+	}
+	lock.Rollback()
+	db.Close()
+	db, err = storage.Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode=DELETE").Scan(&mode); err != nil || mode != "delete" {
+		t.Fatal("startup leaked connection", err)
 	}
 }

@@ -1,4 +1,4 @@
-// Package engine owns M1 domain-neutral application services and validation.
+// Package engine owns domain-neutral application services and validation.
 package engine
 
 import (

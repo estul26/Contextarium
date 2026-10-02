@@ -1,4 +1,4 @@
-// Package server adapts M1 application services and infrastructure probes to HTTP.
+// Package server adapts application services and infrastructure probes to HTTP.
 package server
 
 import (

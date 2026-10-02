@@ -51,7 +51,7 @@ func TestFreshDirectoryAndLifecycle(t *testing.T) {
 	if err := db.QueryRow("SELECT group_concat(name, ',') FROM sqlite_schema WHERE type='table' AND substr(name, 1, 7) != 'sqlite_'").Scan(&names); err != nil {
 		t.Fatal(err)
 	}
-	if names != "schema_migrations,subjects,schemas,records,idempotency_keys" {
+	if names != "schema_migrations,subjects,schemas,records,idempotency_keys,record_revisions,mutation_audit" {
 		t.Fatalf("unexpected milestone tables: %s", names)
 	}
 	if db.Stats().MaxOpenConnections != 1 {

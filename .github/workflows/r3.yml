@@ -1,0 +1,100 @@
+name: Bounded R3 rehearsal
+
+on:
+  push:
+    branches: [m2-implementation]
+    paths:
+      - 'internal/r3/**'
+      - 'scripts/r3-check.py'
+      - '.github/workflows/r3.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: contextarium-approved-r3-two-jobs
+  cancel-in-progress: false
+
+jobs:
+  r3:
+    # Both owner-authorized R3 jobs have been consumed. Execution is disabled.
+    # Removing this false gate requires renewed explicit owner authorization.
+    # Original narrow gates are retained below for review.
+    # Re-run attempts and unrelated pushes never execute this job.
+    if: >-
+      false &&
+      github.repository == 'estul26/Contextarium' &&
+      github.event.repository.private == false &&
+      github.run_attempt == 1 &&
+      (contains(github.event.head_commit.message, '[r3-run-1]') ||
+       contains(github.event.head_commit.message, '[r3-run-2]'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CGO_ENABLED: '1'
+      CC: gcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Enforce public standard runner and two-job ceiling
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          assert os.environ['RUNNER_ENVIRONMENT'] == 'github-hosted'
+          assert os.environ['RUNNER_OS'] == 'Linux'
+          base='https://api.github.com/repos/estul26/Contextarium'
+          def read(url):
+              req=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              return json.load(urllib.request.urlopen(req,timeout=20))
+          assert not read(base)['private']
+          runs=read(base+'/actions/workflows/r3.yml/runs?branch=m2-implementation&event=push&per_page=100')['workflow_runs']
+          # This workflow is introduced by this approval; even skipped pushes count
+          # conservatively. No third job or retry may spend another execution slot.
+          assert len(runs)<=2, 'Authorized two-job ceiling reached'
+          assert os.environ['GITHUB_RUN_ATTEMPT']=='1'
+          print('BOUNDARY: public repository; standard github-hosted ubuntu-24.04; no artifacts/cache uploads; paid usage ceiling $0; R3 job',len(runs),'of 2')
+          PY
+      - name: Build exact candidate paths with test-only interception
+        run: |
+          set -eu
+          baseline=b6f63a7564977555faffe6f9ca6b1a9c22910d43
+          git diff --exit-code "$baseline" -- cmd internal/engine internal/storage internal/server internal/app internal/config go.mod go.sum
+          test -z "$(gofmt -l internal/r3)"
+          git diff --check
+          go mod download
+          go mod verify
+          r3_build=$(mktemp -d "$RUNNER_TEMP/contextarium-r3-build-XXXXXX")
+          touch "$r3_build/.contextarium-r3-owned"
+          echo "R3_BUILD=$r3_build" >> "$GITHUB_ENV"
+          sqlite_dir=$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3)
+          test -n "$sqlite_dir"
+          test -f "$sqlite_dir/sqlite3-binding.h"
+          export CGO_CFLAGS="-I$sqlite_dir"
+          go vet -tags r3 ./internal/r3/...
+          go build -tags r3 -o "$r3_build/worker" ./internal/r3/worker
+          mkdir "$r3_build/m1"
+          git archive 14dc96ad18810202f63d5ac590822f117a787e82 | tar -x -C "$r3_build/m1"
+          (cd "$r3_build/m1" && go build -o "$r3_build/m1-binary" ./cmd/contextarium)
+          python3 - <<'PY'
+          import hashlib,json,os,platform,subprocess
+          from pathlib import Path
+          module=Path(subprocess.check_output(['go','list','-m','-f','{{.Dir}}','github.com/mattn/go-sqlite3'],text=True).strip())
+          files=list(Path('internal/r3').rglob('*'))+[Path('scripts/r3-check.py'),module/'sqlite3-binding.c',module/'sqlite3-binding.h']
+          hashes={p.name if module in p.parents else str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in files if p.is_file()}
+          hashes.update({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('internal').rglob('*.go') if 'r3' not in p.parts})
+          hashes.update({str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('internal/storage/migrations').glob('*.sql')})
+          print(json.dumps({'kind':'build-manifest','candidate':'b6f63a7564977555faffe6f9ca6b1a9c22910d43','harness':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'go':subprocess.check_output(['go','version'],text=True).strip(),'compiler':subprocess.check_output(['gcc','--version'],text=True).splitlines()[0],'kernel':platform.release(),'architecture':platform.machine(),'runner_image':os.getenv('ImageOS'),'runner_version':os.getenv('ImageVersion'),'cpu':os.cpu_count(),'meminfo':Path('/proc/meminfo').read_text().splitlines()[0],'hashes':hashes},sort_keys=True))
+          PY
+      - name: Validate harness first, then bounded R3 matrix
+        run: python3 scripts/r3-check.py --worker "$R3_BUILD/worker" --m1-binary "$R3_BUILD/m1-binary"
+      # No upload-artifact or cache steps: zero-cost storage allowance is unknown.
+      # GitHub disposes this test-owned VM; result manifests/hashes stay in job logs.

@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 //go:embed migrations/001_foundation.sql
@@ -14,6 +15,9 @@ var foundationSQL string
 
 //go:embed migrations/002_records.sql
 var recordsSQL string
+
+//go:embed migrations/003_revisions.sql
+var revisionsSQL string
 
 type migration struct {
 	name string
@@ -24,6 +28,7 @@ type migration struct {
 var migrations = []migration{
 	{name: "foundation", sql: foundationSQL},
 	{name: "records", sql: recordsSQL},
+	{name: "revisions", sql: revisionsSQL},
 }
 
 var ErrIncompatibleSchema = errors.New("database schema is incompatible with this binary")
@@ -33,6 +38,20 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 }
 
 func migrate(ctx context.Context, db *sql.DB, steps []migration) error {
+	return migrateWithHook(ctx, db, steps, nil)
+}
+
+// Barriers are internal test instrumentation, never production configuration.
+func migrateWithHook(ctx context.Context, db *sql.DB, steps []migration, hook func(string) error) error {
+	barrier := func(point string) error {
+		if hook != nil {
+			return hook(point)
+		}
+		return nil
+	}
+	if err := barrier("U0"); err != nil {
+		return err
+	}
 	if len(steps) == 0 {
 		return errors.New("no migrations configured")
 	}
@@ -86,15 +105,66 @@ func migrate(ctx context.Context, db *sql.DB, steps []migration) error {
 		}
 	}
 	for i := applied; i < len(steps); i++ {
-		if _, err := tx.ExecContext(ctx, steps[i].sql); err != nil {
-			return fmt.Errorf("apply migration %d: %w", i+1, err)
+		chunks := []string{steps[i].sql}
+		if i == 2 {
+			chunks = strings.Split(steps[i].sql, "-- M2 U")
+		}
+		for j, chunk := range chunks {
+			if j > 0 {
+				point := strings.SplitN(chunk, "\n", 2)
+				if err := barrier("U" + point[0]); err != nil {
+					return err
+				}
+				chunk = point[1]
+			}
+			if _, err := tx.ExecContext(ctx, chunk); err != nil {
+				return fmt.Errorf("apply migration %d: %w", i+1, err)
+			}
+		}
+		if i == 2 {
+			if err := validateAdoption(ctx, tx); err != nil {
+				return err
+			}
+			if err := barrier("U3"); err != nil {
+				return err
+			}
+			if err := barrier("U4_before_ledger"); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES (?, ?, ?)", i+1, steps[i].name, migrationChecksum(steps[i])); err != nil {
 			return fmt.Errorf("record migration %d: %w", i+1, err)
 		}
+		if i == 2 {
+			if err := barrier("U4"); err != nil {
+				return err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
+	}
+	return barrier("U5")
+}
+
+func validateAdoption(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return err
+	}
+	invalid := rows.Next()
+	scanErr := rows.Err()
+	rows.Close()
+	if invalid || scanErr != nil {
+		return fmt.Errorf("M2 adoption foreign key validation failed")
+	}
+	var valid bool
+	err = tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM records)=(SELECT count(*) FROM record_revisions) AND (SELECT count(*) FROM records)=(SELECT count(*) FROM mutation_audit) AND NOT EXISTS(SELECT 1 FROM records r LEFT JOIN record_revisions v ON v.record_id=r.id AND v.revision_number=r.revision LEFT JOIN mutation_audit a ON a.event_id=v.audit_event_id WHERE v.record_id IS NULL OR a.event_id IS NULL OR v.data IS NOT r.data OR v.provenance IS NOT r.provenance OR v.created_at IS NOT r.created_at OR v.updated_at IS NOT r.updated_at)`).Scan(&valid)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return fmt.Errorf("M2 adoption consistency validation failed")
 	}
 	return nil
 }

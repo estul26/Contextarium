@@ -14,7 +14,7 @@ import (
 	"github.com/estul26/Contextarium/internal/storage"
 )
 
-var ctx = context.Background()
+var ctx = WithAttribution(context.Background(), Actor{Kind: "development_test", ID: "test-harness"}, "req_00000000000000000000000000000001")
 
 const skillSchema = `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string","minLength":1},"level":{"type":"integer","minimum":0,"maximum":5}},"required":["name","level"],"additionalProperties":false}`
 const taskSchema = `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"title":{"type":"string"},"done":{"type":"boolean"}},"required":["title","done"],"additionalProperties":false}`
@@ -29,13 +29,20 @@ func fixture(t *testing.T) (*Service, *sql.DB, string) {
 	t.Cleanup(func() { db.Close() })
 	return New(db), db, path
 }
-func decode[T any](t *testing.T, raw []byte, err error) T {
+func decode[T any](t *testing.T, raw any, err error) T {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var v T
-	if err := json.Unmarshal(raw, &v); err != nil {
+	encoded, marshalErr := json.Marshal(raw)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if b, ok := raw.([]byte); ok {
+		encoded = b
+	}
+	if err := json.Unmarshal(encoded, &v); err != nil {
 		t.Fatal(err)
 	}
 	return v
@@ -79,17 +86,17 @@ func TestTwoIndependentDomainsAndPersistence(t *testing.T) {
 	if task.Sensitivity != "private" || task.Status != "active" {
 		t.Fatal("defaults failed")
 	}
-	raw, err := s.UpdateRecord(ctx, skill.ID, "update", []byte(`{"data":{"name":"Example Skill","level":5},"status":"archived","provenance":{"source":"https://example.com","note":"Synthetic source"}}`))
+	raw, err := s.UpdateRecord(ctx, skill.ID, "update", []byte(`{"base_revision":1,"data":{"name":"Example Skill","level":5},"status":"archived","provenance":{"source":"https://example.com","note":"Synthetic source"}}`))
 	updated := decode[Record](t, raw, err)
 	if updated.ID != skill.ID || updated.SubjectID != sub.ID || updated.Namespace != skill.Namespace || updated.CreatedAt != skill.CreatedAt || updated.Status != "archived" || updated.Provenance.Source != "https://example.com" {
 		t.Fatal("patch invariant failed")
 	}
-	raw, err = s.UpdateRecord(ctx, skill.ID, "replace-provenance", []byte(`{"provenance":{"source":"synthetic note"}}`))
+	raw, err = s.UpdateRecord(ctx, skill.ID, "replace-provenance", []byte(`{"base_revision":2,"provenance":{"source":"synthetic note"}}`))
 	replaced := decode[Record](t, raw, err)
 	if replaced.Provenance.Note != "" {
 		t.Fatal("provenance was merged instead of replaced")
 	}
-	raw, err = s.UpdateRecord(ctx, skill.ID, "unarchive", []byte(`{"status":"active","key":null,"provenance":null}`))
+	raw, err = s.UpdateRecord(ctx, skill.ID, "unarchive", []byte(`{"base_revision":3,"status":"active","key":null,"provenance":null}`))
 	restored := decode[Record](t, raw, err)
 	if restored.Key != nil || restored.Provenance != nil || restored.Status != "active" || string(restored.Data) != string(updated.Data) {
 		t.Fatal("unarchive/null semantics failed")
@@ -107,7 +114,7 @@ func TestTwoIndependentDomainsAndPersistence(t *testing.T) {
 	if err != nil || got.Status != "active" || string(got.Data) != string(restored.Data) {
 		t.Fatalf("persistence: %v %v", got, err)
 	}
-	replay, err := s.UpdateRecord(ctx, skill.ID, "update", []byte(`{"data":{"name":"Example Skill","level":5},"status":"archived","provenance":{"source":"https://example.com","note":"Synthetic source"}}`))
+	replay, err := s.UpdateRecord(ctx, skill.ID, "update", []byte(`{"base_revision":1,"data":{"name":"Example Skill","level":5},"status":"archived","provenance":{"source":"https://example.com","note":"Synthetic source"}}`))
 	historical := decode[Record](t, replay, err)
 	if historical.Status != "archived" {
 		t.Fatal("retry did not return original response")
@@ -124,7 +131,7 @@ func TestSchemaPinningAndImmutableRegistry(t *testing.T) {
 	publish(t, s, "example.skill", 1, skillSchema)
 	r := create(t, s, "create", recordBody(sub.ID, "profile.skills", "example.skill", `{"name":"Example","level":2}`))
 	publish(t, s, "example.skill", 2, strings.Replace(skillSchema, `"maximum":5`, `"maximum":1`, 1))
-	if _, err := s.UpdateRecord(ctx, r.ID, "v1-still-valid", []byte(`{"data":{"name":"Example","level":5}}`)); err != nil {
+	if _, err := s.UpdateRecord(ctx, r.ID, "v1-still-valid", []byte(`{"base_revision":1,"data":{"name":"Example","level":5}}`)); err != nil {
 		t.Fatal("new schema changed v1 validation", err)
 	}
 	b := strings.Replace(string(recordBody(sub.ID, "profile.skills", "example.skill", `{"name":"Example","level":5}`)), `"schema_version":1`, `"schema_version":2`, 1)
@@ -149,7 +156,7 @@ func TestInvalidMutationsLeaveStateAndRetryKeyUntouched(t *testing.T) {
 	r := create(t, s, "create", recordBody(sub.ID, "profile.skills", "example.skill", `{"name":"Example","level":2}`))
 	before, _ := s.GetRecord(ctx, r.ID)
 	for i, b := range []string{`{}`, `{"id":"rec_00000000000000000000000000000000"}`, `{"subject_id":"x"}`, `{"namespace":"elsewhere"}`, `{"schema_version":2}`, `{"revision":1}`, `{"created_at":"x"}`, `{"status":"deleted"}`, `{"data":null}`, `{"sensitivity":null}`, `{"key":5}`, `{"Status":"archived"}`, `{"provenance":{"source":"x","trusted":true}}`, `{"data":{"name":"Example","level":8}}`, `{"data":{"name":"Example","level":"3"}}`, `{"data":{"name":"Example"}}`} {
-		_, err := s.UpdateRecord(ctx, r.ID, fmt.Sprintf("bad-%d", i), []byte(b))
+		_, err := s.UpdateRecord(ctx, r.ID, fmt.Sprintf("bad-%d", i), []byte(`{"base_revision":1,`+b[1:]))
 		if err == nil {
 			t.Fatalf("accepted %s", b)
 		}
@@ -164,9 +171,9 @@ func TestInvalidMutationsLeaveStateAndRetryKeyUntouched(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM idempotency_keys WHERE scope=?", "PATCH records/"+r.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatal("failed writes consumed keys", count, err)
 	}
-	_, err := s.UpdateRecord(ctx, r.ID, "recoverable", []byte(`{"data":{}}`))
+	_, err := s.UpdateRecord(ctx, r.ID, "recoverable", []byte(`{"base_revision":1,"data":{}}`))
 	wantError(t, err, ErrValidation)
-	if _, err := s.UpdateRecord(ctx, r.ID, "recoverable", []byte(`{"status":"archived"}`)); err != nil {
+	if _, err := s.UpdateRecord(ctx, r.ID, "recoverable", []byte(`{"base_revision":1,"status":"archived"}`)); err != nil {
 		t.Fatal(err)
 	}
 	for i, b := range []string{`{"id":"sub_custom","kind":"person","display_name":"Example"}`, `{"kind":null,"display_name":"Example"}`, `{"kind":"Person","display_name":"Example"}`} {
@@ -318,19 +325,40 @@ func TestConcurrentPatchesPreserveOmittedFields(t *testing.T) {
 	errs := make(chan error, 2)
 	go func() {
 		<-start
-		_, err := s.UpdateRecord(ctx, r.ID, "status", []byte(`{"status":"archived"}`))
+		_, err := s.UpdateRecord(ctx, r.ID, "status", []byte(`{"base_revision":1,"status":"archived"}`))
 		errs <- err
 	}()
 	go func() {
 		<-start
-		_, err := other.UpdateRecord(ctx, r.ID, "sensitivity", []byte(`{"sensitivity":"restricted"}`))
+		_, err := other.UpdateRecord(ctx, r.ID, "sensitivity", []byte(`{"base_revision":1,"sensitivity":"restricted"}`))
 		errs <- err
 	}()
 	close(start)
+	successes, conflicts := 0, 0
 	for range 2 {
-		if err := <-errs; err != nil {
+		err := <-errs
+		var conflict *RevisionConflict
+		if err == nil {
+			successes++
+		} else if errors.As(err, &conflict) {
+			conflicts++
+		} else {
 			t.Fatal(err)
 		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatal("both stale writers succeeded", successes, conflicts)
+	}
+	winner, err := s.GetRecord(ctx, r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := `{"base_revision":2,"status":"archived"}`
+	if winner.Status == "archived" {
+		patch = `{"base_revision":2,"sensitivity":"restricted"}`
+	}
+	if _, err := s.UpdateRecord(ctx, r.ID, "explicit-rebase", []byte(patch)); err != nil {
+		t.Fatal(err)
 	}
 	got, err := s.GetRecord(ctx, r.ID)
 	if err != nil || got.Status != "archived" || got.Sensitivity != "restricted" {
@@ -351,7 +379,7 @@ func TestDataNumbersAndUnknownFieldsSurviveStorage(t *testing.T) {
 	if string(got.Data) != data {
 		t.Fatalf("data transformed: %s", got.Data)
 	}
-	raw, err := s.UpdateRecord(ctx, r.ID, "metadata-only", []byte(`{"key":null}`))
+	raw, err := s.UpdateRecord(ctx, r.ID, "metadata-only", []byte(`{"base_revision":1,"key":null}`))
 	updated := decode[Record](t, raw, err)
 	if string(updated.Data) != data {
 		t.Fatalf("metadata update transformed data: %s", updated.Data)
