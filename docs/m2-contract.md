@@ -13,6 +13,24 @@ its implementation restriction has been superseded only for this scoped work.
 
 Current implementation evidence is tracked in the [T01–T30 matrix](m2-evidence.md).
 
+## Current D6/T30 policy approval
+
+**representative-r3-v1 — OWNER APPROVED**, 2026-10-01, following review at
+`ae5e4db31274d84eb6088330f6ff85915bfbee48`. The owner adopted the exact
+[78-fault/234-recovery matrix](m2-r3-representative-proposal.md#6-approved-fault-matrix)
+and demonstrated standard GitHub-hosted `ubuntu-24.04`/test-only VFS environment
+class. Environment selection is resolved; D6/R3 remains OPEN until the
+representative policy is implemented, executed and accepted. See the
+[authoritative R3 test plan](m2-test-plan.md#r3--simulated-storage-failure-and-power-loss).
+
+This permission covers documentation alignment/validation/commit/push only;
+no harness implementation, R3 execution/new slot, production/migration changes,
+merge, deployment or M3. Application remains
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`.
+**T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
+execution slots ZERO.** D1–D5, F0–F8 and U0–U5 are unchanged. Earlier planning
+statements about environment absence below remain historical.
+
 ## Historical documentation approval record
 
 
@@ -507,14 +525,37 @@ updating executable examples belongs to a later authorized M2 implementation.
 | D3: No-op, restore, numbering | Every accepted fresh-key mutation appends; safe-integer revision range; restore only within the unchanged schema pair. |
 | D4: Storage/attribution | Additive 003 with planned guards; component-level development actors, no claimed human/authenticated identity. |
 | D5: Read contract | Full snapshot DTO and bounded ascending pagination with a fixed traversal upper bound. |
-| D6: Recovery acceptance environment | Identify an approved isolated WAL/storage fault rehearsal environment and retain an open gate until exercised. |
+| D6: Recovery acceptance environment and policy | **representative-r3-v1 — OWNER APPROVED:** exact 78 fault cases/234 recovery executions; standard GitHub-hosted ubuntu-24.04, public repository/$0 paid usage, test-only VFS, exact pinned candidate go-sqlite3/bundled SQLite, synthetic/disposable databases and isolated runner-owned temporary storage. Environment selection resolved; **D6/R3 OPEN** until representative implementation, execution and acceptance. No new execution slot. |
 
-D1–D5 are owner-approved design resolutions for this documentation baseline.
-They do not authorize implementation. D6 remains an operational question: no existing power-loss
-harness was found in the repository and none is authorized or run in this design
-pass. The [test plan](m2-test-plan.md) records the evidence required and its blocking
-acceptance impact. Do not reboot/power-cycle the owner's machine or install/start
-new infrastructure to close this gap during planning.
+D1–D5 are owner-approved design resolutions for the original documentation
+baseline; later scoped implementation permission is recorded above. In that
+original design pass no runnable power-loss harness/environment had been found
+or exercised. Subsequent harness runs remain historical supporting evidence.
+On 2026-10-01 the owner resolved D6 environment selection and adopted
+representative-r3-v1 as the D6/T30 acceptance-policy amendment. This supersedes
+broader per-bucket/all-compatible-mode/five-schedule acceptance expansion without
+changing application guarantees or retroactively accepting any run.
+
+The [approved decision record](m2-r3-representative-proposal.md) and
+[test plan](m2-test-plan.md#r3--simulated-storage-failure-and-power-loss) enumerate
+all 12 families, both sector profiles, assigned CB/CA/IOERR/FULL/partial faults,
+the three required seed-17 recovery classes and all 12 post-ack categories.
+Reorder-torn seeds 29/101, incidental WAL fragment lengths, universal positions
+for every I/O shape and every physical page offset are not mandatory acceptance
+expansions. Additional acceptance requirements need separate owner approval.
+
+Contextarium must preserve revision/current/audit/idempotency atomicity,
+migration/adoption atomicity, WAL/FULL configuration, correct successful-sync
+semantics, complete-response external-ledger write/flush/fsync before fault,
+acknowledged-effect survival, exact integrity/FK/linkage recovery oracle and
+duplicate-free replay, without bypassing SQLite durability guarantees. It need
+not reproduce SQLite's upstream exhaustive internal page-layout crash program.
+Hardware/storage that lies about successful sync completion is outside the
+declared model. No personal database, owner-machine reboot/power cycle, real-disk
+filling or production fault surface is approved. Policy approval does not grant
+harness implementation, execution/setup permission or a new slot. T18/F0–F8,
+U0–U5 and ordinary/process recovery remain required; historical faults/timeouts
+and semantic qualifications are retained without automatic completeness credit.
 
 No architecture deviation or new ADR is presently required: the proposal preserves
 the accepted invariants and stages security as already specified. Cross-schema

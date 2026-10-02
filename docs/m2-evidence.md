@@ -9,7 +9,17 @@ The containing implementation commit identifies this source/test tree. The draft
 PR records its exact candidate SHA and the subsequent local/Linux validation
 results, avoiding a self-referential commit hash in this file.
 
-Latest source-review proposal: [bounded sampling v4](#bounded-sampling-v4--source-review-only).
+Latest adopted acceptance policy: **representative-r3-v1 — OWNER APPROVED**,
+2026-10-01. See the [documentation-only adoption record](#representative-r3-v1--owner-approved-documentation-only)
+and [approved matrix](m2-r3-representative-proposal.md#6-approved-fault-matrix).
+The owner approved exactly 78 faults / 234 recovery executions and the demonstrated
+runner/test-only VFS environment class. No representative harness implementation,
+validation or execution has occurred; environment selection is resolved, execution
+slots remain ZERO and all acceptance statuses remain unchanged. Earlier broader
+policy statements below describe their historical source/run; they do not expand
+the newly approved acceptance matrix.
+
+Latest prior harness source-review candidate: [bounded sampling v4](#bounded-sampling-v4--source-review-only).
 Its 79 targeting/preflight, 26 classifier and 16 fixture test methods are prepared
 but **NOT RUN** for this candidate. No controller, bridge, fixture binary, probe,
 fault schedule or dedicated job was executed in this source-only pass. The eighth
@@ -148,7 +158,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T15 | PASS | `TestM2ImmutableSQLHistory`, `TestM2HTTPContractAndSafety` (G/R): UPDATE/DELETE/REPLACE/upsert guards, immutable revision field, GET-only routes/405, absent audit API, unchanged state after reopen. | None. |
 | T16 | PASS | `TestM2LinkageGuards`, `TestM2ImmutableSQLHistory` (G/R): missing references/events, wrong pair/ID, duplicate event, invalid base/source/actor/range, head mismatch including null, deletion/replacement, deferred commit rejection. | None within the approved application/guard boundary; privileged schema editing is outside it. |
 | T17 | PASS | `TestM2ControlledActionClock` (F/G/R): approved restore action and event time/actor linkage under all three clocks; `TestM2HTTPContractAndSafety`, `TestM2PreconditionsAttributionAndFingerprints`, `TestM2NoopKindsAndFullRestore`, `TestM2SnapshotsRestoreAndReplay`, existing privacy tests (G/R/B): explicit actor, spoof rejection, event actions/minimal columns and no payload leakage. | Attribution remains development/test, never authentication. |
-| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | Fifth-, sixth- and seventh-job mutation cases remain historical partial evidence. The eighth job adds completed checkpoint and partial automatic-checkpoint faults only; required mutation/restore F7 storage/sync coverage is still incomplete. No historical cases fill the eighth candidate's missing matrix. |
+| T18 | PARTIAL | `TestM2AtomicFailureBoundaries`, `TestM2SQLWriteAndDeferredCommitFailures`, `TestM2SerializationFailureRollsBack`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit` (G/R): create/data/metadata/archive/unarchive/restore, F0–F6, deferred-constraint F7, postcommit F8 and lost/truncated response. | F0–F8 remain intact. Fifth–eighth-job results remain historical partial/supporting evidence; representative-r3-v1 mutation/restore storage/sync assignments have not executed and historical cases do not fill its fresh completeness matrix. |
 | T19 | PASS | `TestM2RevisionPagination`, `TestM2HTTPContractAndSafety` (G/R): 205+ revisions, limits default/1/100, changed limit, append and restore between pages, fixed end, invalid cursors/queries/numbers, missing/empty, unchanged reads. | None. |
 | T20 | PASS | `TestM2MigrationInterruptionAndRetry`, existing fresh/M0 migration tests (G/R/B): fresh/M0/empty M1 and M1 metadata/keys without records; ledger retained, no invented adoption. New record creation is exercised on fresh and upgraded stores. | None. |
 | T21 | PASS | `TestM2AdoptionAndLegacyReplay` (G/R), B with actual M1 binary: active/archived records, multiple M1 edits/replays, verbatim current bytes/times, one adoption each, explicit boundary. | None. |
@@ -160,7 +170,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Eighth job: 26 classifier + 52 targeting + 16 fixture tests, nine wrappers, prerequisites, five negative controls and genuine M1 fixtures PASS. Bounded invocation timed out after 1,560 cases / 7,800 recoveries; explicit checkpoint complete in both sectors; 1,405 cases establish pre-fault acknowledged-effect survival. | Automatic checkpoint incomplete; later ten operation families unexecuted for this source; five required post-acknowledgement boundaries missing. All eight slots consumed. See the eighth-job reconciliation below; no final acceptance PASS. |
+| T30 | BLOCKED | Eighth job: 26 classifier + 52 targeting + 16 fixture tests, nine wrappers, prerequisites, five negative controls and genuine M1 fixtures PASS. Bounded invocation timed out after 1,560 cases / 7,800 recoveries; explicit checkpoint complete in both sectors; 1,405 cases establish pre-fault acknowledged-effect survival. | representative-r3-v1 and D6 environment class OWNER APPROVED; exact 78 faults/234 recoveries not implemented or executed. Earlier incomplete automatic checkpoint/later-family/post-ack coverage remains historical; no old case fills the new matrix. All eight slots consumed; execution slots ZERO; no final acceptance PASS. |
 
 ## Failure points and observation
 
@@ -2025,3 +2035,112 @@ and timeout diagnostic limits remain open. No acceptance gate is waived. Existin
 worktrees, the original dirty patch, local approval records, binaries and databases
 are preserved. Architecture deviations: **NONE**; this is a test-only sampling
 policy change proposed for review, not application or persistence redesign.
+
+## representative-r3-v1 — OWNER APPROVED; documentation only
+
+**Policy adopted 2026-10-01. T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN;
+M2 acceptance PENDING; PR #6 DRAFT; execution slots ZERO.**
+
+The owner approved [representative-r3-v1](m2-r3-representative-proposal.md), subject
+to explicit preservation of all twelve application families, assigned fault
+modes, both sector profiles, all twelve acknowledgement categories, F0–F8/U0–U5
+and historical evidence. This aligns the contract, test plan, M2 milestone and
+decision record from reviewed remote head
+`ae5e4db31274d84eb6088330f6ff85915bfbee48`. Application remains
+`b6f63a7564977555faffe6f9ca6b1a9c22910d43`; M1 remains
+`14dc96ad18810202f63d5ac590822f117a787e82`.
+
+### Adopted acceptance scope and environment
+
+The [canonical enumerated matrix](m2-r3-representative-proposal.md#6-approved-fault-matrix)
+has 39 assigned faults per sector × two sectors = **78 fault cases**. Each must
+execute discard/17, retain/17 and validated reorder-torn/17, for **234 recovery
+executions**. Reorder-torn/17 must demonstrate actual intended reorder/torn model
+behavior on a suitable probe. Seeds 29/101 are no longer mandatory application
+acceptance requirements. Builds, baseline discovery and prerequisite validation
+are separate work; they do not inflate or substitute for these recovery counts.
+
+The [authoritative plan](m2-test-plan.md#r3--simulated-storage-failure-and-power-loss)
+maps create C1–C2, patch P1–P2, metadata V1, archive V2, unarchive V3, noop V4,
+restore R1–R2, checkpoint K1–K4, autocheckpoint A1–A3, migration/adoption U1–U3,
+fresh initialization I1–I2 and empty-M1 initialization I3–I4. Combined PATCH does
+not replace its separate variants. No universal bucket/position/mode/fragment/
+physical-offset or arbitrary extra-seed expansion is required. Additional
+acceptance requirements need separate owner approval; optional exploratory work
+is not itself authorized to execute.
+
+All 12 post-ack combinations are retained and explicitly enumerated in the plan:
+each of sectors 512 and 4096 requires checkpoint database write, database sync,
+WAL truncate; autocheckpoint database write, database sync, WAL reset/header.
+Only complete successful application responses written, flushed and fsynced to
+the independent external ledger before fault authorization count. A WAL marker
+alone does not. K/A require 22 acknowledged fault cases / 66 recoveries minimum.
+Full integrity/FK/revision/current/audit/idempotency/ledger/exact-data/replay
+oracles, successful-sync semantics and all prior durable history remain required.
+
+**D6 environment class — OWNER APPROVED:** standard GitHub-hosted `ubuntu-24.04`
+runner, public repository/$0 paid usage, test-only VFS, exact pinned candidate
+go-sqlite3/bundled SQLite, synthetic/disposable databases and isolated runner-owned
+temporary storage. No personal database, user-machine reboot/power cycle,
+real-disk filling or production fault surface. This resolves environment
+selection; D6/R3 stays OPEN pending representative implementation, execution and
+acceptance. No setup/job execution or new slot is authorized.
+
+Contextarium owns transaction/adoption atomicity, configuration, correct SQLite
+durability use, complete-response acknowledgement handling, survival/replay and
+its exact recovery oracle. SQLite owns exhaustive internal WAL/page-layout crash
+testing; dishonest successful-sync reports are outside the model. This changes
+acceptance sampling, not production behavior, architecture, storage semantics,
+F0–F8/U0–U5 or ordinary/process-level evidence.
+
+### History and future completeness
+
+The preceding first–eighth job records, failures/timeouts, source-only v3/v4
+records, original broader completeness requirements and classifier qualifications
+are preserved. They are historical evidence and policy history, not a current
+requirement to expand representative-r3-v1. The unchanged current harness still
+codes the earlier broader policy; this documentation does not implement the new
+matrix or validate its future completeness gate.
+
+The eighth job remains **1,560 completed fault cases / 7,800 recovery checks**,
+including **1,405 cases with ledger-fsynced acknowledgement before fault** whose
+**7,025 corresponding recoveries preserved effects and replayed without
+duplication**. Its explicit checkpoints completed both sectors; automatic
+checkpoint and later families remained incomplete; the job timed out. Its
+unfinished case and diagnostic limitations remain unchanged. This is strong
+supporting evidence, with no automatic credit toward new case IDs. No historical
+failure is promoted, no uncertain semantic label is retroactively reassigned,
+and no raw private trace is claimed to have been recovered or reclassified.
+
+A future representative invocation starts fresh and must complete every approved
+case/sector/assigned mode/recovery, prerequisite, acknowledgement category and
+oracle. Historical cases cannot fill that gate without a separate explicit
+approval; no such exception was granted. Policy adoption is not T18/T30 PASS,
+D6 closure, M2 acceptance or merge readiness.
+
+### Documentation publication boundary
+
+Owner permission covers only the five named documentation files, documentation
+validation, commit and push to existing `m2-implementation`/Draft PR #6. No
+production Go, migrations, VFS/controller/targeting/classifier, workflow or
+dependency source changes. No R3, tagged harness, classifier bridge, faults,
+recovery schedules or application tests/builds are run in this alignment. No
+execution slot is requested or consumed; no merge, deployment or M3 follows.
+Ordinary CI may run after the documentation push; it is not R3 evidence.
+
+Documentation validation checks diff/whitespace, local links/anchors, exact
+matrix arithmetic/family/acknowledgement mappings, unchanged F0–F8/U0–U5 text,
+preservation of historical evidence and exclusion of every non-documentation
+path from the commit. No test/harness module is imported or executed for these
+checks. The publication commit identifies the exact documentation tree without
+a self-referential commit hash here.
+
+Performed documentation checks: **PASS** for 72 local/pinned-repository links
+and anchors, all 24 canonical boundary-assignment rows unchanged from the approved
+proposal, 12 explicit family mappings, 39 × 2 = 78 faults and 78 × 3 = 234
+recoveries, all 12 acknowledgement categories and 22 acknowledged cases / 66
+recoveries minimum. Byte comparisons confirm unchanged F0–F8/U0–U5 sections and
+original T18 requirements, application-contract sections 1–7, original R3 planning
+text and every historical failure/run/v4 section. Diff/whitespace and scope checks
+confirm only the five authorized documentation paths. This is documentation
+validation, not new application or harness test evidence.
