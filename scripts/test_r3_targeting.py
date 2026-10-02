@@ -330,7 +330,7 @@ class TargetingTests(unittest.TestCase):
     def test_first_middle_last_selection_preserves_all_positions(self):
         frames=[self.event(i+10,offset=page_offset(i),length=4096,commit=False) for i in range(5)]
         sync=self.event(20,op='sync',offset=0,length=0,flags=2)
-        targets=self.c.select_targets(frames+[sync,self.event(21)],'noop')
+        targets=self.c.validation_bucket_targets(frames+[sync,self.event(21)],'noop')
         frame_plans=[p for _,p in targets if p['descriptor']['meaning']=='wal-page-data']
         self.assertEqual([p['baseline_seq'] for p in frame_plans],[10,12,14])
         self.assertEqual([p['samples'] for p in frame_plans],[['first'],['middle'],['last']])
@@ -338,12 +338,12 @@ class TargetingTests(unittest.TestCase):
         self.assertTrue(all(p['group_count']==5 for p in frame_plans))
 
     def test_single_member_group_retains_all_sample_labels(self):
-        targets=self.c.select_targets([self.event(4,op='sync',offset=0,length=0),self.event()], 'noop')
+        targets=self.c.validation_bucket_targets([self.event(4,op='sync',offset=0,length=0),self.event()], 'noop')
         self.assertTrue(all(p['samples']==['first','middle','last'] for _,p in targets))
 
     def test_required_commit_group_absent_fails_discovery(self):
         with self.assertRaisesRegex(AssertionError,'commit marker not identified'):
-            self.c.select_targets([self.event(4,op='sync',offset=0,length=0)],'noop')
+            self.c.validation_bucket_targets([self.event(4,op='sync',offset=0,length=0)],'noop')
 
     def test_extra_frame_header_does_not_disturb_page_write_group(self):
         items=[self.event(10,length=4096),self.event(20,length=4096)]
@@ -384,7 +384,7 @@ class TargetingTests(unittest.TestCase):
                 dict(op='sync',offset=0,length=0,flags=3),dict(length=24,commit=True)]
         events=[self.event(1+i*5+j,**shape) for i,shape in enumerate(shapes) for j in range(5)]
         groups={}
-        for key,plan in self.c.select_targets(events,'noop'):
+        for key,plan in self.c.validation_bucket_targets(events,'noop'):
             self.assertEqual(key,self.c.target_group(plan['descriptor']))
             groups.setdefault(key,[]).append(plan)
         self.assertEqual(len(groups),len(shapes)-2)
@@ -520,16 +520,45 @@ class TargetingTests(unittest.TestCase):
     def recovered(self):
         return [dict(schedule=s,seed=n,outcome='present') for s,n in self.c.RECOVERY_SCHEDULES]
 
-    def coverage_fixture(self, acknowledged=False):
-        # Synthetic gate inputs only, never application/durability evidence.
+    def representative_events(self, operation, db_count=5):
+        events=[]
+        def add(**fields):
+            event=self.event(len(events)+1,**fields)
+            event.update(rc=0,applied=event['length'] if event['op']=='write' else 1)
+            events.append(event)
+        add(phase='open',offset=0,length=32,commit=False)
+        add(phase='open',op='sync',offset=0,length=0,flags=2)
+        def transaction(phase, reset=False):
+            if reset:add(phase=phase,offset=0,length=32,commit=False)
+            add(phase=phase,offset=frame_offset(1),length=24,commit=False)
+            add(phase=phase,offset=page_offset(1),length=4096,commit=False)
+            add(phase=phase,offset=frame_offset(2),length=24)
+            add(phase=phase,offset=page_offset(2),length=4096)
+            add(phase=phase,op='sync',offset=0,length=0,flags=2)
+        def checkpoint(phase):
+            for i in range(db_count):add(phase=phase,name='store.db',offset=i*4096,length=4096)
+            add(phase=phase,name='store.db',op='sync',offset=0,length=0,flags=2)
+        if operation=='checkpoint':
+            transaction('checkpoint-create-000');checkpoint('checkpoint')
+            add(phase='checkpoint',op='truncate',offset=0,length=0)
+        elif operation=='autocheckpoint':
+            transaction('autocheckpoint-create-000')
+            transaction('autocheckpoint-create-001');checkpoint('autocheckpoint-create-001')
+            transaction('autocheckpoint-create-002',reset=True)
+        else:
+            phase=operation if operation in ('migration','fresh','empty-m1') else 'mutation-'+operation
+            transaction(phase)
+        return events
+
+    def row_plans(self, operation, db_count=5):
+        return self.c.select_representative_targets(self.representative_events(operation,db_count),operation)
+
+    def coverage_fixture(self, acknowledged=True):
+        # Fresh synthetic IDs only. This is not application/durability evidence.
         coverage=self.c.AcceptanceCoverage()
         for op in self.c.REQUIRED_OPERATIONS:
             for sector in (512,4096):
-                events=[self.event(1,name='store.db',length=4096),
-                        self.event(2,name='store.db',op='sync',offset=0,length=0),
-                        self.event(3,op='truncate',offset=0,length=0),self.event(4,offset=0,length=32)]
-                plans=[(None,self.plan([e])) for e in events]
-                coverage.plan(op,sector,plans)
+                plans=self.row_plans(op);coverage.plan(op,sector,plans)
                 for _,plan in plans:
                     for fault in self.c.fault_modes(plan):
                         coverage.complete(op,sector,plan,fault,self.recovered(),int(acknowledged))
@@ -543,32 +572,67 @@ class TargetingTests(unittest.TestCase):
         for op in self.c.REQUIRED_OPERATIONS:
             for sector in (512,4096):
                 with self.subTest(operation=op,sector=sector):
-                    coverage=self.coverage_fixture(True);del coverage.planned[(op,sector)]
+                    coverage=self.coverage_fixture();del coverage.planned[(op,sector)]
                     with self.assertRaisesRegex(AssertionError,'required operation/sector family absent'):
                         coverage.require_complete()
 
     def test_missing_required_target_combination_cannot_pass(self):
-        coverage=self.coverage_fixture(True);coverage.completed.pop()
+        coverage=self.coverage_fixture();coverage.completed.pop()
         with self.assertRaisesRegex(AssertionError,'required target/fault cases incomplete'):
             coverage.require_complete()
 
-    def test_zero_acknowledged_effect_coverage_cannot_pass(self):
+    def test_zero_acknowledged_category_coverage_cannot_pass(self):
+        coverage=self.coverage_fixture();coverage.post_ack.clear()
         with self.assertRaisesRegex(AssertionError,'new acknowledged-effect recovery coverage missing'):
-            self.coverage_fixture(False).require_complete()
+            coverage.require_complete()
 
-    def test_incomplete_recovery_schedules_cannot_complete_case(self):
-        coverage=self.c.AcceptanceCoverage();plan=self.plan();coverage.plan('noop',512,[(None,plan)])
-        with self.assertRaisesRegex(AssertionError,'incomplete recovery schedules'):
-            coverage.complete('noop',512,plan,'ioerr',self.recovered()[:-1],1)
-        self.assertEqual(coverage.completed,set())
+    def test_every_checkpoint_case_needs_an_acknowledgement(self):
+        for op in ('checkpoint','autocheckpoint'):
+            plans=self.row_plans(op)
+            for _,plan in plans:
+                for mode in self.c.fault_modes(plan):
+                    coverage=self.c.AcceptanceCoverage();coverage.plan(op,512,plans)
+                    with self.assertRaisesRegex(AssertionError,'lacks pre-fault acknowledgement'):
+                        coverage.complete(op,512,plan,mode,self.recovered(),0)
+                    self.assertEqual(coverage.completed,set())
 
-    def test_complete_synthetic_gate_inputs_are_accepted(self):
-        self.coverage_fixture(True).require_complete()
+    def test_incomplete_or_extra_recovery_schedules_cannot_complete_case(self):
+        plans=self.row_plans('noop');plan=plans[0][1]
+        variants=[self.recovered()[:-1],self.recovered()+[dict(schedule='reorder-torn',seed=29,outcome='present')],
+                  self.recovered()[::-1]]
+        for recovered in variants:
+            coverage=self.c.AcceptanceCoverage();coverage.plan('noop',512,plans)
+            with self.assertRaisesRegex(AssertionError,'incomplete recovery schedules'):
+                coverage.complete('noop',512,plan,'partial',recovered,0)
+            self.assertEqual(coverage.completed,set())
+
+    def test_complete_fresh_synthetic_ids_are_accepted(self):
+        coverage=self.coverage_fixture();coverage.require_complete()
+        self.assertEqual(coverage.completed,self.c.expected_case_ids())
+        self.assertEqual(len(coverage.completed),78)
+        self.assertEqual(len(coverage.post_ack & self.c.required_acknowledgements()),12)
+
+    def test_duplicate_completed_id_and_unassigned_mode_are_rejected(self):
+        plans=self.row_plans('noop');plan=plans[0][1]
+        coverage=self.c.AcceptanceCoverage();coverage.plan('noop',512,plans)
+        coverage.complete('noop',512,plan,'partial',self.recovered(),0)
+        with self.assertRaisesRegex(AssertionError,'duplicate completed case'):
+            coverage.complete('noop',512,plan,'partial',self.recovered(),0)
+        with self.assertRaisesRegex(AssertionError,'unplanned completed case'):
+            coverage.complete('noop',512,plan,'full',self.recovered(),0)
+
+    def test_historical_sequence_based_ids_cannot_fill_representative_gate(self):
+        coverage=self.coverage_fixture()
+        identity=coverage.completed.pop()
+        coverage.completed.add(('checkpoint',512,1477,'partial'))
+        self.assertNotIn(identity,coverage.completed)
+        with self.assertRaisesRegex(AssertionError,'required target/fault cases incomplete'):
+            coverage.require_complete()
 
     def test_1477_database_offsets_form_one_bucket_and_three_samples(self):
         writes=[self.event(i+10,name='store.db',phase='checkpoint',offset=i*4096,length=4096) for i in range(1477)]
         events=[self.event(1),self.event(2,op='sync',offset=0,length=0)]+writes
-        targets=self.c.select_targets(events,'noop')
+        targets=self.c.validation_bucket_targets(events,'noop')
         sampled=[p for _,p in targets if p['descriptor']['role']=='database']
         self.assertEqual(len({self.c.target_group(self.message(e)) for e in writes}),1)
         self.assertEqual([p['group_position'] for p in sampled],[1,739,1477])
@@ -626,7 +690,7 @@ class TargetingTests(unittest.TestCase):
 
     def test_many_page_fragment_lengths_form_one_bucket(self):
         fragments=[self.event(i+10,offset=page_offset(i),length=i+1) for i in range(1000)]
-        targets=self.c.select_targets([self.event(1),self.event(2,op='sync',offset=0,length=0)]+fragments,'noop')
+        targets=self.c.validation_bucket_targets([self.event(1),self.event(2,op='sync',offset=0,length=0)]+fragments,'noop')
         plans=[p for _,p in targets if p['coverage_bucket']['shape']=='wal-page-fragment']
         self.assertEqual(len(plans),3)
         self.assertEqual([p['group_position'] for p in plans],[1,501,1000])
@@ -670,7 +734,7 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(matcher.seen,0);self.assertNotIn(b'i ',self.sink.getvalue())
         with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):matcher.require_reached(None)
         with self.assertRaisesRegex(AssertionError,'commit marker not identified'):
-            self.c.select_targets(events+[self.event(5,op='sync',offset=0,length=0)],'noop')
+            self.c.validation_bucket_targets(events+[self.event(5,op='sync',offset=0,length=0)],'noop')
 
     def test_nth_database_member_ignores_other_buckets_and_missing_n_fails(self):
         a=self.event(1,name='store.db',length=4096,offset=0)
@@ -688,26 +752,22 @@ class TargetingTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError,'invalid target group plan'):self.c.TargetMatcher(plan)
         self.assertEqual(self.sink.getvalue(),b'')
 
-    def planning_fixture(self, db_count=0, distinct_flags=False, history=None):
+    def planning_fixture(self, db_count=5, history=None):
         requests=[{'Operation':op} for op in self.c.REQUIRED_OPERATIONS]
-        events=[self.event(1),self.event(2,op='sync',offset=0,length=0)]
-        events += [self.event(i+3,name='store.db',offset=4096*i,length=4096,
-                              flags=i if distinct_flags else 0) for i in range(db_count)]
         def discover(request,sector):
             if history is not None:history.append((request['Operation'],sector))
-            # Fake discovery data only: no worker, SQLite or real plan is run.
-            return dict(targets=self.c.select_targets(events,'noop'),seedimage={},seedstate={})
+            return dict(targets=self.row_plans(request['Operation'],db_count),seedimage={},seedstate={})
         return requests,discover
 
     def test_full_plan_all_24_discoveries_precede_first_application_case(self):
-        history=[];requests,discover=self.planning_fixture(history=history);coverage=self.c.AcceptanceCoverage()
-        iterator=self.c.application_cases(requests,discover,coverage);self.assertEqual(history,[])
-        first=next(iterator)
+        history=[];requests,discover=self.planning_fixture(history=history)
+        coverage=self.c.AcceptanceCoverage();iterator=self.c.application_cases(requests,discover,coverage)
+        self.assertEqual(history,[]);first=next(iterator)
         self.assertEqual(history,[(op,s) for op in self.c.MATRIX_ORDER for s in (512,4096)])
         self.assertEqual(len(coverage.planned),24)
-        self.assertEqual(first[0]['operation'],'checkpoint');self.assertEqual(first[0]['sector'],512)
-        kinds=[call.kwargs['kind'] for call in self.log.call_args_list]
-        self.assertEqual(kinds,['application-plan','application-plan-gate','schedule'])
+        self.assertEqual(first[0]['operation'],'checkpoint');self.assertEqual(first[1]['row_id'],'K1')
+        self.assertEqual([call.kwargs['kind'] for call in self.log.call_args_list],
+                         ['application-plan','application-plan-gate','schedule'])
 
     def test_late_discovery_failure_yields_no_application_fault_case(self):
         history=[];requests,discover=self.planning_fixture(history=history);injections=[]
@@ -720,88 +780,231 @@ class TargetingTests(unittest.TestCase):
         self.assertEqual(len(history),23);self.assertEqual(injections,[]);self.assertEqual(coverage.planned,{})
         self.log.assert_not_called()
 
-    def test_oversized_full_plan_fails_before_any_application_fault(self):
-        history=[];requests,discover=self.planning_fixture(8,True,history);injections=[]
-        coverage=self.c.AcceptanceCoverage()
-        with self.assertRaisesRegex(AssertionError,'fault-case budget exceeded'):
-            for item in self.c.application_cases(requests,discover,coverage):injections.append(item)
-        self.assertEqual(len(history),24);self.assertEqual(injections,[]);self.assertEqual(coverage.planned,{})
-        self.assertEqual(len(self.log.call_args_list),1)
-        summary=self.log.call_args.kwargs
-        self.assertEqual(summary['preflight'],'PENDING')
-        self.assertEqual(summary['fault_cases'],1152);self.assertEqual(summary['recoveries'],5760)
-        self.assertEqual(len(summary['buckets']),240);self.assertEqual(summary['omitted_bucket_rows'],0)
-
-    def test_recovery_limit_is_independently_enforced_before_faults(self):
-        requests,discover=self.planning_fixture(8,True);injections=[]
-        with mock.patch.object(self.c,'MAX_PLANNED_FAULT_CASES',2000):
-            with self.assertRaisesRegex(AssertionError,'recovery budget exceeded'):
-                for item in self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()):injections.append(item)
-        self.assertEqual(injections,[])
-        self.assertFalse(any(c.kwargs['kind']=='application-plan-gate' for c in self.log.call_args_list))
-
-    def test_plan_arithmetic_and_every_compatible_mode_are_preserved(self):
-        requests,discover=self.planning_fixture();cases=list(self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()))
-        summary=next(c.kwargs for c in self.log.call_args_list if c.kwargs['kind']=='application-plan')
-        self.assertEqual(len(cases),192);self.assertEqual(summary['targets'],48)
-        self.assertEqual(summary['fault_cases'],192);self.assertEqual(summary['recoveries'],960)
-        self.assertEqual(sum(b['fault_cases'] for b in summary['buckets']),192)
-        self.assertEqual(sum(f['recoveries'] for f in summary['families']),960)
-        self.assertEqual({mode for _,_,mode in cases},set(self.c.FAULT_MODES))
-        self.assertEqual(summary['max_fault_cases'],1000);self.assertEqual(summary['max_recoveries'],5000)
-        self.assertEqual(summary['recovery_schedules'],[['discard',17],['retain',17],['reorder-torn',17],['reorder-torn',29],['reorder-torn',101]])
-
-    def test_plan_inclusive_limits_accept_equal_counts(self):
+    def test_exact_approved_assignments_not_every_compatible_mode(self):
         requests,discover=self.planning_fixture()
-        with mock.patch.object(self.c,'MAX_PLANNED_FAULT_CASES',192),mock.patch.object(self.c,'MAX_PLANNED_RECOVERIES',960):
-            cases=list(self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()))
-        self.assertEqual(len(cases),192)
+        cases=list(self.c.application_cases(requests,discover,self.c.AcceptanceCoverage()))
+        expected={
+            'C1':('cut-before','cut-after','ioerr','full','partial'),'C2':('cut-before','cut-after','ioerr'),
+            'P1':('partial',),'P2':('ioerr',),'R1':('cut-before','cut-after','partial'),'R2':('ioerr',),
+            'U1':('cut-before',),'U2':('cut-before','cut-after','full','partial'),'U3':('ioerr',),
+            'V1':('ioerr',),'V2':('ioerr',),'V3':('ioerr',),'V4':('partial',),
+            'I1':('partial',),'I2':('ioerr',),'I3':('full',),'I4':('ioerr',),
+            'K1':('partial',),'K2':('ioerr',),'K3':('cut-before','cut-after','ioerr'),
+            'K4':('cut-before','cut-after','ioerr'),'A1':('full',),'A2':('ioerr',),'A3':('partial',)}
+        self.assertEqual({row:modes for row,_,_,modes in self.c.REPRESENTATIVE_ROWS},expected)
+        ids={(self.c.TARGET_POLICY,t['row_id'],b['sector'],mode) for b,t,mode in cases}
+        self.assertEqual(ids,self.c.expected_case_ids());self.assertEqual(len(cases),78)
+        summary=next(c.kwargs for c in self.log.call_args_list if c.kwargs['kind']=='application-plan')
+        self.assertEqual((summary['targets'],summary['fault_cases'],summary['recoveries']),(48,78,234))
+        self.assertEqual(summary['recovery_schedules'],[['discard',17],['retain',17],['reorder-torn',17]])
+        self.assertEqual(len(summary['required_acknowledgements']),12)
+        self.assertEqual(sum(f['fault_cases'] for f in summary['families']),78)
+        self.assertEqual(sum(r['recoveries'] for r in summary['rows']),234)
 
     def test_full_plan_missing_sector_or_family_never_passes_preflight(self):
         requests,discover=self.planning_fixture();plans=self.c.compile_application_plans(requests,discover)
         for index in range(24):
-            with self.subTest(index=index):
-                with self.assertRaisesRegex(AssertionError,'full plan families/sectors'):
-                    self.c.preflight_application_plans(plans[:index]+plans[index+1:])
+            with self.assertRaisesRegex(AssertionError,'full plan families/sectors'):
+                self.c.preflight_application_plans(plans[:index]+plans[index+1:])
         self.log.assert_not_called()
 
-    def test_preflight_rejects_duplicate_target_or_missing_sample(self):
-        for duplicate in (True,False):
-            with self.subTest(duplicate=duplicate):
-                requests,discover=self.planning_fixture(5);plans=self.c.compile_application_plans(requests,discover)
-                targets=plans[0]['targets']
-                if duplicate:targets.append(targets[-1])
-                else:targets.pop()
-                with self.assertRaisesRegex(AssertionError,'duplicate plan target|first middle last coverage incomplete'):
-                    self.c.preflight_application_plans(plans)
+    def test_extra_missing_or_duplicate_row_never_passes_preflight(self):
+        for alteration in ('extra','missing','duplicate'):
+            requests,discover=self.planning_fixture();plans=self.c.compile_application_plans(requests,discover)
+            targets=plans[0]['targets']
+            if alteration=='missing':targets.pop()
+            else:targets.append(targets[-1])
+            with self.assertRaisesRegex(AssertionError,'family rows missing or duplicated'):
+                self.c.preflight_application_plans(plans)
+        self.log.assert_not_called()
 
-    def test_oversized_summary_is_bounded_and_reports_omitted_buckets(self):
-        requests,discover=self.planning_fixture(25,True);plans=self.c.compile_application_plans(requests,discover)
-        with self.assertRaisesRegex(AssertionError,'fault-case budget exceeded'):self.c.preflight_application_plans(plans)
-        summary=self.log.call_args.kwargs
-        self.assertEqual(summary['bucket_count'],648);self.assertEqual(len(summary['buckets']),512)
-        self.assertEqual(summary['omitted_bucket_rows'],136);self.assertEqual(len(summary['all_buckets_sha256']),64)
-        wire=json.dumps(summary);self.assertNotIn('hex',wire);self.assertNotIn('Body',wire)
-        self.assertLess(len(wire),300000)
+    def test_unapproved_fault_expansion_is_rejected_before_injection(self):
+        requests,discover=self.planning_fixture();plans=self.c.compile_application_plans(requests,discover)
+        plans[0]['targets'][0][1]['modes'].append('full')
+        with self.assertRaisesRegex(AssertionError,'unapproved representative row or fault assignment'):
+            self.c.preflight_application_plans(plans)
+        self.log.assert_not_called()
 
-    def test_1477_write_sampling_is_bounded_for_all_fake_family_plans(self):
+    def test_many_database_pages_do_not_expand_approved_case_set(self):
         requests,discover=self.planning_fixture(1477)
-        plans=self.c.compile_application_plans(requests,discover);summary=self.c.preflight_application_plans(plans)
-        self.assertEqual(summary['fault_cases'],552);self.assertEqual(summary['recoveries'],2760)
-        self.assertTrue(all(f['targets']==5 for f in summary['families']))
+        summary=self.c.preflight_application_plans(self.c.compile_application_plans(requests,discover))
+        self.assertEqual((summary['fault_cases'],summary['recoveries']),(78,234))
+        self.assertEqual(len(summary['rows']),48)
+        selected={r['row_id']:r['target'] for r in summary['rows'] if r['sector']==512}
+        self.assertEqual(selected['K1']['group_position'],1)
+        self.assertEqual(selected['K2']['group_position'],1477)
+        self.assertEqual(selected['A1']['group_position'],739)
 
-    def test_plan_announces_unchanged_required_acknowledgement_categories(self):
-        requests,discover=self.planning_fixture();summary=self.c.preflight_application_plans(self.c.compile_application_plans(requests,discover))
-        required=[]
-        for sector in (512,4096):
-            for op in ('checkpoint','autocheckpoint'):
-                required.extend([[op,sector,'database','write'],[op,sector,'database','sync']])
-            required.extend([['checkpoint',sector,'wal','truncate'],['autocheckpoint',sector,'wal','wal-header-reset']])
-        self.assertEqual(summary['required_acknowledgements'],sorted(required))
-        self.assertEqual(len(required),12)
-        with self.assertRaisesRegex(AssertionError,'new acknowledged-effect recovery coverage missing'):
-            self.coverage_fixture(False).require_complete()
+    def test_small_checkpoint_pass_fails_without_substitution(self):
+        for operation,count in (('checkpoint',1),('autocheckpoint',2)):
+            with self.assertRaisesRegex(AssertionError,'checkpoint pass too small'):
+                self.row_plans(operation,count)
 
+    def test_committing_sync_requires_complete_payload_not_startup_sync(self):
+        events=self.representative_events('create')
+        targets=dict(self.c.select_representative_targets(events,'create'))
+        self.assertEqual(targets['C2']['baseline_seq'],events[-1]['seq'])
+        # A committed header followed by half a page and a sync is insufficient.
+        events[-2].update(length=2048,hex=bytes(2048).hex(),applied=2048)
+        with self.assertRaisesRegex(AssertionError,'committing WAL sync not observed'):
+            self.c.select_representative_targets(events,'create')
+
+    def test_commit_fragment_cannot_replace_complete_header(self):
+        events=self.representative_events('noop');header=events[-3]
+        header['length']=12;header['hex']=header['hex'][:24];header['applied']=12
+        with self.assertRaisesRegex(AssertionError,'commit marker not identified'):
+            self.c.select_representative_targets(events,'noop')
+
+    def test_upgrade_precommit_page_is_bound_to_noncommit_frame(self):
+        plans=dict(self.row_plans('migration'));target=plans['U1']
+        self.assertLess(target['baseline_seq'],plans['U2']['baseline_seq'])
+        self.assertEqual(target['binding']['boundary'],'precommit-page')
+        self.assertEqual(target['descriptor']['meaning'],'wal-page-data')
+        events=self.representative_events('migration')
+        events[2]['hex']=frame_header(4096,commit=True).hex()
+        with self.assertRaisesRegex(AssertionError,'representative boundary missing'):
+            self.c.select_representative_targets(events,'migration')
+
+    def test_auto_reset_is_after_completed_pass_and_in_subsequent_create(self):
+        targets=dict(self.row_plans('autocheckpoint'))
+        reset=targets['A3'];sync=targets['A2']
+        self.assertEqual(reset['binding']['checkpoint_phase'],sync['binding']['phase'])
+        self.assertGreater(reset['binding']['phase'],sync['binding']['phase'])
+        events=self.representative_events('autocheckpoint')
+        events=[e for e in events if not (e['role']=='database' and e['op']=='sync')]
+        with self.assertRaisesRegex(AssertionError,'automatic checkpoint pass missing'):
+            self.c.select_representative_targets(events,'autocheckpoint')
+
+    def test_multiple_database_passes_in_one_phase_fail_as_ambiguous(self):
+        events=self.representative_events('checkpoint')
+        events.append(dict(events[-3],seq=len(events)+1))
+        with self.assertRaisesRegex(AssertionError,'multiple checkpoint passes'):
+            self.c.select_representative_targets(events,'checkpoint')
+
+    def test_representative_matcher_binds_phase_generation_and_private_prefix(self):
+        events=self.representative_events('create');target=dict(self.row_plans('create'))['C2']
+        matcher=self.c.RepresentativeMatcher(target);trace=[]
+        for event in events:
+            pre={k:v for k,v in event.items() if k not in ('rc','applied')};trace.append(pre)
+            self.trace.write_text(''.join(json.dumps(e)+'\n' for e in trace))
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(event),[])
+            trace.append(dict(seq=event['seq'],stage='post',rc=event['rc'],applied=event['applied']))
+        self.assertTrue(matcher.trace_verified);self.assertTrue(matcher.decision_sent)
+        self.assertEqual(matcher.selected_seq,events[-1]['seq'])
+        matcher.require_reached({'seq':events[-1]['seq']})
+
+    def test_representative_failed_prefix_cannot_authorize_selected_fault(self):
+        events=self.representative_events('create');target=dict(self.row_plans('create'))['C2']
+        matcher=self.c.RepresentativeMatcher(target);trace=[]
+        for event in events[:-1]:
+            pre={k:v for k,v in event.items() if k not in ('rc','applied')}
+            matcher.observe(self.message(event));trace += [pre,dict(seq=event['seq'],stage='post',rc=0,applied=event['applied'])]
+        trace[1]['rc']=10
+        trace.append({k:v for k,v in events[-1].items() if k not in ('rc','applied')})
+        self.trace.write_text(''.join(json.dumps(e)+'\n' for e in trace))
+        with self.assertRaisesRegex(AssertionError,'pre-fault I/O did not complete successfully'):
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(events[-1]),[])
+        self.assertEqual(self.sink.getvalue(),b'');self.assertFalse(matcher.decision_sent)
+
+    def test_live_wal_generation_drift_is_rejected(self):
+        events=self.representative_events('create');target=dict(self.row_plans('create'))['C1']
+        matcher=self.c.RepresentativeMatcher(target)
+        matcher.observe(self.message(events[0]))
+        matcher.observe(self.message(dict(events[0],seq=2)))
+        with self.assertRaisesRegex(AssertionError,'transaction/epoch drift'):
+            for event in events[2:]:matcher.observe(self.message(dict(event,seq=event['seq']+1)))
+
+    def test_missing_selected_last_write_never_falls_back_to_first(self):
+        target=dict(self.row_plans('checkpoint'))['K2'];matcher=self.c.RepresentativeMatcher(target)
+        events=self.representative_events('checkpoint')
+        writes=[e for e in events if e['phase']=='checkpoint' and e['op']=='write']
+        for event in events:
+            if event['seq']>=writes[-1]['seq']:break
+            matcher.observe(self.message(event))
+        with self.assertRaisesRegex(AssertionError,'required descriptor target not reached'):
+            matcher.require_reached(None)
+        self.assertFalse(matcher.decision_sent)
+
+    def test_fault_applied_bytes_are_checked(self):
+        event=dict(self.event(length=24),rc=10,applied=12)
+        self.c.verify_fault_result({},'partial',event)
+        for wrong in (0,11,24):
+            with self.assertRaisesRegex(AssertionError,'applied bytes mismatch'):
+                self.c.verify_fault_result({},'partial',dict(event,applied=wrong))
+        with self.assertRaisesRegex(AssertionError,'cut-before I/O was applied'):
+            self.c.verify_fault_result({},'cut-before',event)
+
+    def test_reorder_torn_validation_witness_rejects_discard_and_retain(self):
+        self.c.validate_reorder_torn()
+        controller=self.c
+        for schedule in ('discard','retain'):
+            class Broken(controller.Model):
+                def crash(inner,mode,seed):return super().crash(schedule,seed)
+            with self.assertRaisesRegex(AssertionError,'did not reorder and tear'):
+                self.c.validate_reorder_torn(Broken)
+
+    def test_later_header_or_checkpoint_sync_cannot_borrow_a_durable_commit(self):
+        events=self.representative_events('create');committing_seq=events[-1]['seq']
+        events.append(dict(events[-1],seq=committing_seq+1))
+        target=dict(self.c.select_representative_targets(events,'create'))['C2']
+        self.assertEqual(target['baseline_seq'],committing_seq)
+        self.assertEqual(target['group_count'],1)
+
+    def test_sync_halfway_through_commit_payload_is_not_committing_sync(self):
+        events=self.representative_events('create');last_sync=events.pop()
+        payload=events.pop();half=dict(payload,length=2048,hex=bytes(2048).hex(),applied=2048)
+        events += [half,dict(last_sync,seq=payload['seq']+1),
+                   dict(half,seq=payload['seq']+2,offset=payload['offset']+2048),
+                   dict(last_sync,seq=payload['seq']+3)]
+        target=dict(self.c.select_representative_targets(events,'create'))['C2']
+        self.assertEqual(target['baseline_seq'],events[-1]['seq'])
+        self.assertEqual(target['group_count'],1)
+
+    def test_every_required_post_ack_category_is_independently_enforced(self):
+        for category in self.c.required_acknowledgements():
+            coverage=self.coverage_fixture();coverage.post_ack.remove(category)
+            with self.assertRaisesRegex(AssertionError,'new acknowledged-effect recovery coverage missing'):
+                coverage.require_complete()
+
+    def test_missing_external_ledger_ack_prevents_checkpoint_injection_command(self):
+        events=self.representative_events('checkpoint');plan=dict(self.row_plans('checkpoint'))['K1']
+        matcher=self.c.RepresentativeMatcher(plan);trace=[]
+        for event in events:
+            pre={k:v for k,v in event.items() if k not in ('rc','applied')};trace.append(pre)
+            self.trace.write_text(''.join(json.dumps(e)+'\n' for e in trace))
+            if event['seq']==plan['baseline_seq']:
+                with self.assertRaisesRegex(AssertionError,'lacks pre-fault acknowledgement'):
+                    self.c.decide_io(self.sink,self.trace,matcher,self.message(event),[])
+                break
+            self.c.decide_io(self.sink,self.trace,matcher,self.message(event),[])
+            trace.append(dict(seq=event['seq'],stage='post',rc=0,applied=event['applied']))
+        self.assertNotIn(b'i ',self.sink.getvalue());self.assertFalse(matcher.decision_sent)
+
+    def request_fixture(self):
+        return dict(subjects=[dict(id='synthetic-subject')],
+            records=[dict(id='archived-record',status='archived',revision=3),
+                     dict(id='active-record',status='active',revision=3)],
+            record_revisions=[dict(record_id='archived-record',data=json.dumps({'state':i}),
+                key='old-key',sensitivity='private',provenance='{"source":"old"}',status='archived')
+                for i in range(3)])
+
+    def test_combined_patch_nullable_metadata_and_noop_keep_separate_requests(self):
+        requests={r['Operation']:r for r in self.c.mutation_requests(self.request_fixture())}
+        patch=self.c.precise(requests['patch']['Body']);metadata=json.loads(requests['metadata']['Body'])
+        self.assertEqual(set(patch),{'base_revision','data','key','sensitivity','provenance','status'})
+        self.assertEqual(patch['data']['n'],('number','9007199254740993'))
+        self.assertEqual(patch['data']['d'],('number','0.30'))
+        self.assertEqual(patch['data']['e'],('number','1e2'))
+        self.assertEqual(patch['data']['z'],('number','-0'))
+        self.assertNotIn('data',metadata);self.assertIsNone(metadata['key']);self.assertIsNone(metadata['provenance'])
+        self.assertEqual(json.loads(requests['noop']['Body']),{'base_revision':3,'status':'archived'})
+        self.assertEqual(requests['restore']['Target'],1)
+        self.assertEqual(json.loads(requests['restore']['Body'])['base_revision'],3)
+
+    def test_restore_requires_three_distinct_content_snapshots(self):
+        before=self.request_fixture();before['record_revisions'][2]=dict(before['record_revisions'][1])
+        with self.assertRaisesRegex(AssertionError,'snapshots are not distinct'):
+            self.c.mutation_requests(before)
 
     def test_raw_and_unknown_lengths_are_bounded_separate_classes(self):
         raw=[self.event(i,offset=frame_offset(i),length=100+i) for i in range(1,101)]

@@ -23,13 +23,25 @@ class. Environment selection is resolved; D6/R3 remains OPEN until the
 representative policy is implemented, executed and accepted. See the
 [authoritative R3 test plan](m2-test-plan.md#r3--simulated-storage-failure-and-power-loss).
 
-This permission covers documentation alignment/validation/commit/push only;
+The policy approval covered documentation alignment/validation/commit/push only;
 no harness implementation, R3 execution/new slot, production/migration changes,
 merge, deployment or M3. Application remains
 `b6f63a7564977555faffe6f9ca6b1a9c22910d43`.
 **T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
 execution slots ZERO.** D1–D5, F0–F8 and U0–U5 are unchanged. Earlier planning
 statements about environment absence below remain historical.
+
+## Subsequent representative harness source-only authorization
+
+On 2026-10-01 the owner authorized the scoped next step: representative harness
+and necessary test-source adaptation, static review, commit and push to existing
+Draft PR #6. See the [source review record](m2-r3-representative-source-review.md).
+This supersedes the policy-adoption implementation restriction only for this
+source-only work. No tests, classifier bridge, compilation/build, fixture/probe,
+no-fault discovery, R3 or fault/recovery schedule is executed or authorized here.
+Production code, migrations, VFS/classifier, dependencies and workflows stay
+unchanged. No execution slot is requested or consumed. T18 PARTIAL, T30 BLOCKED,
+D6/R3 OPEN, M2 acceptance PENDING and PR #6 DRAFT remain unchanged.
 
 ## Historical documentation approval record
 

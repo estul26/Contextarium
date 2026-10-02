@@ -19,7 +19,7 @@ import tempfile
 import time
 
 CANDIDATE = 'b6f63a7564977555faffe6f9ca6b1a9c22910d43'
-SEEDS = (17, 29, 101)
+SEEDS = (17,)
 TABLES = ('subjects', 'schemas', 'records', 'record_revisions', 'mutation_audit', 'idempotency_keys', 'schema_migrations', 'sqlite_schema')
 SNAPSHOT = ('subject_id','namespace','schema_id','schema_version','data','key','sensitivity','provenance','status','created_at','updated_at')
 MARKER = '.contextarium-r3-owned'
@@ -39,6 +39,8 @@ LABELS = set(('startup open fixture inspection close settings model-validation c
               'native-write-failed unexpected-mapped-pointer phase-length phase-label '
               'decision-input-eof decision-reply-invalid').split())
 LABELS.update('mutation-'+op for op in ('create','patch','metadata','archive','unarchive','noop','restore'))
+LABELS.update(f'autocheckpoint-create-{i:03d}' for i in range(40))
+LABELS.add('checkpoint-create-000')
 DIAGNOSTIC_KINDS = {'worker-progress', 'worker-error', 'worker-fatal', 'vfs-operation', 'vfs-fatal'}
 FIXTURE_STAGES = {'launch','readiness','subject','schema','record','update','close'}
 FIXTURE_CODES = {'fixture-http-status','fixture-response-too-large','fixture-http-close',
@@ -337,7 +339,8 @@ def check_settings(settings):
     # Keep the existing required checks, with explicit optional mmap reporting.
     require(settings['sqlite_version()']=='3.53.4' and settings['foreign_keys']==1 and
             settings['journal_mode']=='wal' and settings['synchronous']==2 and
-            settings['busy_timeout']==1000 and settings['max_open_connections']==1,
+            settings['busy_timeout']==1000 and settings['max_open_connections']==1 and
+            settings['wal_autocheckpoint']==1000,
             'candidate settings changed')
     require(settings['mmap_size'] == 0 or settings['mmap_size'] ==
             {'supported':False,'reason':'vfs-control-notfound-no-row'}, 'unexpected mmap setting')
@@ -519,21 +522,56 @@ def write_input(path, request):
 def inspect(worker, path):
     return json.loads(run(worker, '-root', path, '-mode', 'inspect'))
 
-# Discovery keeps the approved first/middle/last samples. Sequence numbers only
-# identify trace rows. The coverage bucket and Nth live member select a sample;
-# full descriptors remain evidence and exact private trace authorizes injection.
+# Discovery binds the fixed representative rows to transaction/pass/generation
+# context. Sequence numbers identify trace evidence, never acceptance case IDs.
+# Only K1/K2/A1 sample database-write positions; exact private trace gates faults.
 TARGET_FIELDS = ('phase','name','role','op','meaning','offset','length','flags','wal_page_size')
-TARGET_POLICY = 'bounded-coverage-bucket-nth-v4'
-MAX_PLANNED_FAULT_CASES = 1000
-MAX_PLANNED_RECOVERIES = 5000
-MAX_PLAN_SUMMARY_BUCKETS = 512
+TARGET_POLICY = 'representative-r3-v1'
+EXPECTED_FAULT_CASES = 78
+EXPECTED_RECOVERIES = 234
 FAULT_MODES = ('cut-before','cut-after','ioerr','full','partial')
 REQUIRED_OPERATIONS = ('create','patch','metadata','archive','unarchive','noop','restore',
                        'checkpoint','autocheckpoint','migration','fresh','empty-m1')
 MATRIX_ORDER = ('checkpoint','autocheckpoint','restore','migration','fresh','empty-m1',
                 'noop','create','patch','metadata','archive','unarchive')
-RECOVERY_SCHEDULES = (('discard',17),('retain',17),('reorder-torn',17),
-                      ('reorder-torn',29),('reorder-torn',101))
+RECOVERY_SCHEDULES = (('discard',17),('retain',17),('reorder-torn',17))
+# Owner-approved assignments, not all modes supported by an I/O shape.
+# IDs are stable across discovery and may never be filled by historical cases.
+REPRESENTATIVE_ROWS = (
+    ('C1','create','commit-write',('cut-before','cut-after','ioerr','full','partial')),
+    ('C2','create','commit-sync',('cut-before','cut-after','ioerr')),
+    ('P1','patch','commit-write',('partial',)),
+    ('P2','patch','commit-sync',('ioerr',)),
+    ('R1','restore','commit-write',('cut-before','cut-after','partial')),
+    ('R2','restore','commit-sync',('ioerr',)),
+    ('U1','migration','precommit-page',('cut-before',)),
+    ('U2','migration','commit-write',('cut-before','cut-after','full','partial')),
+    ('U3','migration','commit-sync',('ioerr',)),
+    ('V1','metadata','commit-sync',('ioerr',)),
+    ('V2','archive','commit-sync',('ioerr',)),
+    ('V3','unarchive','commit-sync',('ioerr',)),
+    ('V4','noop','commit-write',('partial',)),
+    ('I1','fresh','commit-write',('partial',)),
+    ('I2','fresh','commit-sync',('ioerr',)),
+    ('I3','empty-m1','commit-write',('full',)),
+    ('I4','empty-m1','commit-sync',('ioerr',)),
+    ('K1','checkpoint','database-first',('partial',)),
+    ('K2','checkpoint','database-last',('ioerr',)),
+    ('K3','checkpoint','database-sync',('cut-before','cut-after','ioerr')),
+    ('K4','checkpoint','wal-truncate',('cut-before','cut-after','ioerr')),
+    ('A1','autocheckpoint','database-middle',('full',)),
+    ('A2','autocheckpoint','database-sync',('ioerr',)),
+    ('A3','autocheckpoint','wal-reset',('partial',)),
+)
+
+
+def representative_rows(operation):
+    return [row for row in REPRESENTATIVE_ROWS if row[1]==operation]
+
+
+def expected_case_ids():
+    return {(TARGET_POLICY,row,sector,mode) for row,_,_,modes in REPRESENTATIVE_ROWS
+            for sector in (512,4096) for mode in modes}
 
 
 def wal_header_page_size(data):
@@ -618,14 +656,14 @@ def candidate_descriptor(event):
 
 
 def target_selector(descriptor):
-    """Retained baseline/live selector evidence, not v4 coverage sampling.
+    """Retained baseline/live geometry evidence, not a case expansion policy.
 
     Only positive WAL append offsets are geometry in this descriptor projection.
 
     The projection retains exact length/flags, validated page size and semantic
     fields. Header-reset offset zero, raw/fragment ranges, truncate size,
-    sync offset/flags and database/journal offsets stay exact in this evidence. V4 chooses a LIVE sample
-    by bucket/N, not by equality with this baseline projection; pre/post trace
+    sync offset/flags and database/journal offsets stay exact in this evidence.
+    Representative rows add transaction/pass/generation binding; pre/post trace
     verification still compares the entire live descriptor, including offsets.
     """
     descriptor=candidate_descriptor(descriptor)
@@ -677,9 +715,142 @@ def make_target(items, index, samples):
             'group_position':index+1,'group_count':len(items),'baseline_seq':items[index]['seq']}
 
 
+class BoundaryTracker:
+    """Bind storage candidates to one worker transaction and WAL generation.
+
+    The worker uses a distinct fixed phase for each checkpoint preparation
+    create. A complete header is not a complete frame: committing sync candidates
+    require coverage of that frame's entire page payload. Checkpoint passes end
+    at database sync and cannot borrow writes from another transaction/pass.
+    Successful-prefix verification occurs independently before injection.
+    """
+    def __init__(self, page_size=4096):
+        require(valid_page_size(page_size),'invalid database page size')
+        self.page_size=page_size;self.generation=0;self.states={}
+        self.completed_pass=None;self.last_committing_phase=None
+
+    def observe(self, event):
+        d=candidate_descriptor(event);phase=d['phase']
+        state=self.states.setdefault(phase,dict(frames={},counts={},commit_seen=False,
+            complete_commit=False,db_writes=0,db_closed=False,committing_sync=False))
+        bindings=[]
+        def mark(boundary, **extra):
+            counts=state['counts'];counts[boundary]=counts.get(boundary,0)+1
+            binding=dict(boundary=boundary,phase=phase,generation=self.generation,
+                         position=counts[boundary],**extra)
+            bindings.append(binding)
+        if d['role']=='wal' and d['op']=='write':
+            meaning=d['meaning'];size=d['wal_page_size'];offset=d['offset']
+            if meaning=='wal-header-reset':
+                self.generation+=1;state['frames'].clear();state['complete_commit']=False
+                if (phase.startswith('autocheckpoint-create-') and self.completed_pass and
+                        self.completed_pass.startswith('autocheckpoint-create-') and
+                        phase!=self.completed_pass):
+                    mark('wal-reset',checkpoint_phase=self.completed_pass)
+            elif meaning in ('wal-frame','wal-commit-marker'):
+                frame=(offset-32)//(size+24)
+                state['frames'][frame]=dict(commit=meaning=='wal-commit-marker',ranges=[])
+                if meaning=='wal-commit-marker':
+                    state['commit_seen']=True;mark('commit-write')
+            elif meaning=='wal-page-data':
+                frame=(offset-32)//(size+24);header=state['frames'].get(frame)
+                if header is not None:
+                    if not header['commit'] and not state['commit_seen']:mark('precommit-page')
+                    start=(offset-32)%(size+24)-24
+                    header['ranges'].append((start,start+d['length']))
+                    end=0
+                    for left,right in sorted(header['ranges']):
+                        if left>end:break
+                        end=max(end,right)
+                    if header['commit'] and end==size:state['complete_commit']=True
+        elif d['role']=='wal' and d['op']=='sync':
+            if state['complete_commit']:
+                mark('commit-sync');state['committing_sync']=True;self.last_committing_phase=phase
+            # A later checkpoint/header-only sync cannot borrow this commit.
+            state['complete_commit']=False
+        checkpoint=(phase=='checkpoint' or phase.startswith('autocheckpoint-create-'))
+        if checkpoint and d['role']=='database':
+            if d['op']=='write':
+                require(not state['db_closed'],'multiple checkpoint passes in one transaction phase')
+                require(d['length']==self.page_size and d['offset']%self.page_size==0,
+                        'checkpoint write is not a complete database page')
+                if phase=='checkpoint':
+                    require(self.last_committing_phase=='checkpoint-create-000',
+                            'explicit checkpoint lacks its durable preparation transaction')
+                else:require(state['committing_sync'],'automatic checkpoint precedes committing WAL sync')
+                state['db_writes']+=1;mark('database-write')
+            elif d['op']=='sync' and state['db_writes']:
+                require(not state['db_closed'],'multiple checkpoint database syncs in one pass')
+                state['db_closed']=True;mark('database-sync',writes=state['db_writes'])
+                self.completed_pass=phase
+        if phase=='checkpoint' and d['role']=='wal' and d['op']=='truncate' and d['offset']==0:
+            require(state['db_closed'],'WAL truncate precedes completed checkpoint database sync')
+            mark('wal-truncate',checkpoint_phase=phase)
+        return bindings
+
+
+def representative_target(row, items, index, sample, page_size):
+    row_id,operation,boundary,modes=row
+    require(items and 0<=index<len(items),'representative boundary missing')
+    event,binding=items[index];descriptor=event_descriptor(event)
+    return dict(descriptor=descriptor,selector=target_selector(descriptor),
+        coverage_bucket=coverage_bucket(descriptor),samples=[sample],
+        group_position=index+1,group_count=len(items),baseline_seq=event['seq'],
+        policy=TARGET_POLICY,row_id=row_id,operation=operation,boundary=boundary,db_page_size=page_size,
+        binding=binding,modes=list(modes))
+
+
+def select_representative_targets(events, operation, page_size=4096):
+    """Exactly one target for each approved row; no incidental shape expansion."""
+    tracker=BoundaryTracker(page_size);found={}
+    for event in events:
+        require(event['rc']==0,'representative baseline contains failed I/O')
+        if event['op'] not in ('write','sync','truncate'):continue
+        for binding in tracker.observe(event_descriptor(event)):
+            found.setdefault((binding['phase'],binding['boundary']),[]).append((event,binding))
+    rows=representative_rows(operation);require(rows,'unknown representative family')
+    transaction_phase=operation if operation in ('migration','fresh','empty-m1') else 'mutation-'+operation
+    pass_phase='checkpoint'
+    if operation=='autocheckpoint':
+        passes=sorted(phase for phase,boundary in found if boundary=='database-sync' and
+                      phase.startswith('autocheckpoint-create-'))
+        require(passes,'automatic checkpoint pass missing');pass_phase=passes[0]
+    if operation in ('checkpoint','autocheckpoint'):
+        writes=found.get((pass_phase,'database-write'),[])
+        require(len(writes)>=(2 if operation=='checkpoint' else 3),'representative checkpoint pass too small')
+        require(len(found.get((pass_phase,'database-sync'),[]))==1,'checkpoint database sync missing or ambiguous')
+    else:
+        require(found.get((transaction_phase,'commit-write')),'commit marker not identified')
+        require(found.get((transaction_phase,'commit-sync')),'committing WAL sync not observed')
+    result=[]
+    for row in rows:
+        boundary=row[2];phase=transaction_phase;kind=boundary;index=0;sample='first'
+        if boundary=='commit-sync':sample='last'
+        elif boundary.startswith('database-') or boundary=='wal-truncate':
+            phase=pass_phase
+            if boundary!='database-sync' and boundary.startswith('database-'):kind='database-write'
+            if boundary=='database-last':sample='last'
+            elif boundary=='database-middle':sample='middle'
+        if boundary=='wal-reset':
+            items=[item for (p,b),values in found.items() if b=='wal-reset' for item in values
+                   if item[1]['checkpoint_phase']==pass_phase]
+            # First reset reusing the first completed automatic pass, never initialization.
+            items=sorted(items,key=lambda item:item[0]['seq'])[:1]
+        else:items=found.get((phase,kind),[])
+        require(items,'representative boundary missing')
+        if sample=='last':index=len(items)-1
+        elif sample=='middle':index=len(items)//2
+        target=representative_target(row,items,index,sample,page_size)
+        result.append((row[0],target))
+    return result
+
+
 def target_summary(plan):
-    return {k:plan[k] for k in ('descriptor','selector','coverage_bucket','samples','group_position','group_count','baseline_seq')} | {
-        'identity_policy':TARGET_POLICY,'wal_classifier':'wal-format-boundaries-v1'}
+    result={k:plan[k] for k in ('descriptor','selector','coverage_bucket','samples','group_position','group_count','baseline_seq')} | {
+        'identity_policy':TARGET_POLICY if 'row_id' in plan else 'validation-bucket-nth',
+        'wal_classifier':'wal-format-boundaries-v1'}
+    result.update({k:plan[k] for k in ('policy','row_id','operation','boundary','db_page_size','binding','modes') if k in plan})
+    return result
 
 
 def target_evidence(plan, event):
@@ -710,7 +881,7 @@ class TargetMatcher:
                 plan['samples'] and all(s in ('first','middle','last') for s in plan['samples']),
                 'invalid target group plan')
 
-    def observe(self, event):
+    def observe(self, event, eligible=True):
         require(self.selected_seq is None,'repeated target decision')
         descriptor=candidate_descriptor(event)
         self.geometry_change=None
@@ -719,6 +890,7 @@ class TargetMatcher:
         observed=dict(descriptor,seq=event['seq'])
         self.last_observed=(self.last_observed+[observed])[-8:]
         group=target_group(descriptor)
+        if not eligible:return False
         if group!=self.group:
             # Relevant alternatives share phase OR file. Bound shape storage;
             # overflow is explicit, never silently presented as a full census.
@@ -760,6 +932,76 @@ class TargetMatcher:
                 'acknowledged_before_fault':self.ack_before_fault}
 
 
+class RepresentativeMatcher(TargetMatcher):
+    def __init__(self, plan):
+        super().__init__(plan);validate_representative_target(plan)
+        self.tracker=BoundaryTracker(plan['db_page_size'])
+
+    def observe(self, event):
+        binding=self.plan['binding'];eligible=False
+        for live in self.tracker.observe(event):
+            if (live['phase'],live['boundary'])!=(binding['phase'],binding['boundary']):continue
+            require({k:v for k,v in live.items() if k!='position'}==
+                    {k:v for k,v in binding.items() if k!='position'},'representative transaction/epoch drift')
+            require(coverage_bucket(candidate_descriptor(event))==self.plan['coverage_bucket'],
+                    'representative boundary shape drift')
+            eligible=True
+        return super().observe(event,eligible)
+
+    def verify_prefix(self, trace, event):
+        events,pending=read_trace(trace)
+        require(set(pending)=={e['seq'] for e in events}|{event['seq']},'incomplete pre-fault trace prefix')
+        require(all(e['rc']==0 for e in events),'pre-fault I/O did not complete successfully')
+        tracker=BoundaryTracker(self.plan['db_page_size']);binding=None
+        for row in sorted(pending.values(),key=lambda e:e['seq']):
+            if row['op'] not in ('write','sync','truncate'):continue
+            live=tracker.observe(event_descriptor(row))
+            if row['seq']==event['seq']:
+                binding=next((b for b in live if b['boundary']==self.plan['binding']['boundary']),None)
+        require(binding==self.plan['binding'],'private trace transaction/epoch mismatch')
+
+
+def validate_representative_target(plan):
+    row=next((r for r in REPRESENTATIVE_ROWS if r[0]==plan.get('row_id')),None)
+    require(row is not None and plan.get('policy')==TARGET_POLICY and
+            (plan.get('operation'),plan.get('boundary'),plan.get('modes'))==(row[1],row[2],list(row[3])),
+            'unapproved representative row or fault assignment')
+    require(valid_page_size(plan['db_page_size']),'invalid representative database page size')
+    binding=plan['binding'];boundary=row[2];op=row[1]
+    kind='database-write' if boundary in ('database-first','database-last','database-middle') else boundary
+    require(binding['boundary']==kind and binding['position']==plan['group_position'] and
+            binding['phase']==plan['descriptor']['phase'] and type(binding['generation']) is int and
+            binding['generation']>=0,'invalid representative binding')
+    count=plan['group_count'];position=plan['group_position']
+    sample='last' if boundary in ('commit-sync','database-last') else ('middle' if boundary=='database-middle' else 'first')
+    require(plan['samples']==[sample] and position==({'first':1,'last':count,'middle':count//2+1}[sample]),
+            'unapproved representative position')
+    if op not in ('checkpoint','autocheckpoint'):
+        phase=op if op in ('migration','fresh','empty-m1') else 'mutation-'+op
+        require(binding['phase']==phase,'wrong representative transaction phase')
+    elif op=='checkpoint':require(binding['phase']=='checkpoint','wrong explicit checkpoint phase')
+    else:
+        require(binding['phase'].startswith('autocheckpoint-create-'),'wrong automatic transaction phase')
+        if boundary=='wal-reset':require(binding.get('checkpoint_phase','').startswith('autocheckpoint-create-') and
+                                         binding['checkpoint_phase']<binding['phase'],'reset is not subsequent WAL reuse')
+    if boundary in ('database-first','database-last','database-middle'):
+        require(count>=(2 if op=='checkpoint' else 3),'representative checkpoint pass too small')
+    if boundary=='database-sync':require(binding.get('writes',0)>=(2 if op=='checkpoint' else 3),'checkpoint sync lacks sufficient pass writes')
+    descriptor=plan['descriptor'];kind=descriptor['meaning']
+    expected={'commit-write':('wal','write','wal-commit-marker'),
+              'commit-sync':('wal','sync','sync'),
+              'precommit-page':('wal','write','wal-page-data'),
+              'database-first':('database','write','write'),
+              'database-last':('database','write','write'),
+              'database-middle':('database','write','write'),
+              'database-sync':('database','sync','sync'),
+              'wal-truncate':('wal','truncate','truncate'),
+              'wal-reset':('wal','write','wal-header-reset')}
+    require((descriptor['role'],descriptor['op'],kind)==expected[boundary] and
+            descriptor['name'] in ('store.db','store.db-wal'),'representative boundary descriptor mismatch')
+    if boundary=='wal-truncate':require(descriptor['offset']==0,'checkpoint WAL truncate must shrink to zero')
+
+
 def verify_pending_trace(trace, event):
     # The VFS flushed its private pre-row before blocking. Read only a bounded
     # tail; a row larger than the bound fails rather than authorizing a fault.
@@ -782,10 +1024,13 @@ def decide_io(stream, trace, matcher, event, acknowledgements):
             stage='bucket-match-before-trace-verification',**matcher.geometry_change)
     if inject:
         verify_pending_trace(trace,event)
+        if isinstance(matcher,RepresentativeMatcher):matcher.verify_prefix(trace,event)
         matcher.trace_verified=True
         # Only complete successful mutation responses already fsynced in the
         # external ledger count. A WAL marker is never an acknowledgement.
         matcher.ack_before_fault=sum('result_text' in a for a in acknowledgements)
+        if matcher.plan.get('operation') in ('checkpoint','autocheckpoint'):
+            require(matcher.ack_before_fault>0,'representative checkpoint fault lacks pre-fault acknowledgement')
     stream.write((('i' if inject else 'c')+' '+str(event['seq'])+'\n').encode())
     stream.flush()
     if inject:matcher.decision_sent=True
@@ -803,6 +1048,10 @@ def record_acknowledgement(ledger, acknowledgements, case, request, message):
 
 
 def fault_modes(target):
+    if 'row_id' in target:
+        validate_representative_target(target)
+        return list(target['modes'])
+    # The separate VFS probe is not an application acceptance row.
     op=target['descriptor']['op']
     return ['cut-before','cut-after','ioerr']+(['full'] if op in ('write','truncate') else [])+(['partial'] if op=='write' else [])
 
@@ -825,16 +1074,25 @@ class AcceptanceCoverage:
 
     def plan(self, operation, sector, targets):
         key=(operation,sector)
-        require(key not in self.planned and targets,'missing/repeated family plan')
-        self.planned[key]={(p['baseline_seq'],mode) for _,p in targets for mode in fault_modes(p)}
+        require(key not in self.planned and sector in (512,4096),'missing/repeated family plan')
+        require([row for row,_ in targets]==[r[0] for r in representative_rows(operation)],
+                'approved representative family rows missing or duplicated')
+        for row,plan in targets:
+            validate_representative_target(plan)
+            require(plan['row_id']==row and plan['operation']==operation,'representative family binding mismatch')
+        self.planned[key]={(p['row_id'],mode) for _,p in targets for mode in fault_modes(p)}
 
     def complete(self, operation, sector, plan, fault, results, ack_before_fault):
-        key=(operation,sector);item=(plan['baseline_seq'],fault)
+        validate_representative_target(plan)
+        key=(operation,sector);item=(plan['row_id'],fault)
         require(key in self.planned and item in self.planned[key],'unplanned completed case')
-        identity=(*key,*item)
+        require(plan['operation']==operation,'completed representative family mismatch')
+        identity=(TARGET_POLICY,plan['row_id'],sector,fault)
         require(identity not in self.completed,'duplicate completed case')
         require([(r['schedule'],r['seed']) for r in results]==list(RECOVERY_SCHEDULES), 'incomplete recovery schedules')
         require(all(r['outcome'] in ('present','absent') for r in results),'invalid recovered outcome')
+        if operation in ('checkpoint','autocheckpoint'):
+            require(ack_before_fault>0,'representative checkpoint fault lacks pre-fault acknowledgement')
         self.completed.add(identity)
         if ack_before_fault>0:
             d=plan['descriptor'];self.post_ack.add((operation,sector,d['role'],d['meaning']))
@@ -842,7 +1100,10 @@ class AcceptanceCoverage:
     def require_complete(self):
         families={(op,sector) for op in REQUIRED_OPERATIONS for sector in (512,4096)}
         require(set(self.planned)==families,'required operation/sector family absent')
-        expected={(*key,*item) for key,items in self.planned.items() for item in items}
+        expected=expected_case_ids()
+        require(len(expected)==EXPECTED_FAULT_CASES and
+                { (TARGET_POLICY,row,key[1],mode) for key,items in self.planned.items() for row,mode in items }==expected,
+                'approved representative plan identities differ')
         require(self.completed==expected,'required target/fault cases incomplete')
         require(required_acknowledgements()<=self.post_ack,'new acknowledged-effect recovery coverage missing')
 
@@ -853,7 +1114,7 @@ def execute(worker, root, case, request, initial, target=None, fault='none', sec
                 'diagnostic entry forbids targets, faults, probes and non-create requests')
     require((target is None and fault=='none') or (isinstance(target,dict) and fault in FAULT_MODES), 'invalid target/fault pair')
     if target is not None:require(fault in fault_modes(target),'fault mode incompatible with target operation')
-    matcher=TargetMatcher(target) if target is not None else None
+    matcher=(RepresentativeMatcher(target) if 'row_id' in target else TargetMatcher(target)) if target is not None else None
     budget(root)
     live = owned(root, 'live') if probe else materialize(root, 'live', initial)
     config = root / 'input.json'
@@ -1184,7 +1445,41 @@ def model_validation():
             if e['op']=='sync': return
             super().consume(e)
     expect_reject('incorrect-sync-semantics','successful sync persistence',lambda:check(BrokenSync))
+    validate_reorder_torn()
+    class DiscardInstead(Model):
+        def crash(self,schedule,seed):return super().crash('discard',seed)
+    class RetainInstead(Model):
+        def crash(self,schedule,seed):return super().crash('retain',seed)
+    for name,broken in (('reorder-torn-degenerates-to-discard',DiscardInstead),
+                        ('reorder-torn-degenerates-to-retain',RetainInstead)):
+        expect_reject(name,'reorder-torn/17 did not reorder and tear',lambda:validate_reorder_torn(broken))
     log(kind='validation',name='independent-storage-model',result='PASS')
+
+def validate_reorder_torn(model_class=Model):
+    """Witness actual seed-17 reorder and proper-prefix tears, not only a name.
+
+    Instrument apply() in a validation subclass; leave the storage algorithm
+    untouched. Nonoverlapping multi-byte writes also distinguish the image from
+    both discard and retain. Post-sync application cases need no artificial I/O.
+    """
+    class Witness(model_class):
+        def apply(self,image,event):
+            self.witness.append((event['seq'],event['applied']))
+            Model.apply(image,event)
+    model=Witness({'probe.db':bytes(64*64)});model.witness=[]
+    for i in range(64):
+        model.consume(dict(seq=i+1,op='write',name='probe.db',rc=0,flags=0,
+            offset=i*64,applied=64,hex=(bytes([i+1])*64).hex()))
+    model.witness=[];image=model.crash('reorder-torn',17);observed=list(model.witness)
+    require(any(a[0]>b[0] for a,b in zip(observed,observed[1:])) and
+            any(0<n<64 for _,n in observed),'reorder-torn/17 did not reorder and tear')
+    require(image not in (Model.crash(model,'discard',17),Model.crash(model,'retain',17)),
+            'reorder-torn/17 did not reorder and tear')
+    model.witness=[]
+    require(model.crash('reorder-torn',17)==image and model.witness==observed,
+            'reorder-torn/17 not deterministic')
+    log(kind='validation',name='reorder-torn-behavior',seed=17,result='PASS',
+        reordered=True,proper_prefix_torn=True,distinct_from_discard_retain=True)
 
 def raw_validation(worker,root):
     result=execute(worker,root,'probe',{}, {}, probe=True)
@@ -1313,7 +1608,8 @@ def m1_fixture(binary,root,empty=False):
         if primary is None and secondary:raise FixtureError(secondary[0]['error_code'])
     return legacy
 
-def select_targets(events,operation):
+def validation_bucket_targets(events,operation):
+    # Legacy bucket-geometry regressions only; never application acceptance.
     groups={}
     for e in events:
         if e['op'] not in ('write','sync','truncate') or e['phase']=='open':continue
@@ -1355,81 +1651,83 @@ def compile_application_plans(requests, discover):
 
 
 def preflight_application_plans(plans):
-    """Emit one bounded census, then reject oversized plans WITHOUT truncation.
-
-    At most 512 bucket rows are logged (largest contributors first on overflow).
-    An accepted <=1000-case plan has <=333 buckets, since every target has at
-    least three fault modes. Thus no accepted plan loses any bucket detail.
-    Oversized reports disclose omitted rows and hash the complete bucket census.
-    """
+    """Validate the exact approved ID set before yielding ANY application fault."""
     require([(p['operation'],p['sector']) for p in plans]==
             [(op,sector) for op in MATRIX_ORDER for sector in (512,4096)],
             'full plan families/sectors missing duplicated or out of order')
-    families=[];buckets=[];total_cases=0;total_targets=0
+    families=[];rows=[];identities=set();coverage=AcceptanceCoverage()
     for batch in plans:
-        targets=batch['targets'];require(targets,'empty family plan')
-        seen=set();groups={};cases=0
-        for key,target in targets:
-            TargetMatcher(target)  # Validate descriptor/bucket/selector linkage.
-            require(key==target_group(target['descriptor']),'plan coverage bucket key mismatch')
-            require(target['baseline_seq'] not in seen,'duplicate plan target')
-            seen.add(target['baseline_seq']);groups.setdefault(key,[]).append(target)
-            modes=fault_modes(target)
-            require(len(modes)==len(set(modes)) and set(modes)<=set(FAULT_MODES),'invalid planned fault modes')
-            cases+=len(modes)
-        bucket_cases=0
-        for key,items in groups.items():
-            count=items[0]['group_count'];positions=sorted({1,count//2+1,count})
-            require(all(p['group_count']==count for p in items) and
-                    sorted(p['group_position'] for p in items)==positions,
-                    'plan first middle last coverage incomplete')
-            for p in items:
-                require(p['samples']==[label for label,pos in
-                    (('first',1),('middle',count//2+1),('last',count)) if pos==p['group_position']],
-                    'plan sample labels incorrect')
-            n=sum(len(fault_modes(p)) for p in items);bucket_cases+=n
-            buckets.append({'operation':batch['operation'],'sector':batch['sector'],
-                'coverage_bucket':dict(key),'observed_members':count,'targets':len(items),
-                'positions':positions,'fault_cases':n,'recoveries':n*len(RECOVERY_SCHEDULES)})
-        require(bucket_cases==cases,'plan bucket case arithmetic mismatch')
-        families.append({'operation':batch['operation'],'sector':batch['sector'],
-            'buckets':len(groups),'targets':len(targets),'fault_cases':cases,
-            'recoveries':cases*len(RECOVERY_SCHEDULES)})
-        total_cases+=cases;total_targets+=len(targets)
-    recoveries=total_cases*len(RECOVERY_SCHEDULES)
-    require(total_cases==sum(f['fault_cases'] for f in families)==sum(b['fault_cases'] for b in buckets)
-            and recoveries==sum(f['recoveries'] for f in families)==sum(b['recoveries'] for b in buckets),
-            'plan total arithmetic mismatch')
-    ordered=sorted(buckets,key=lambda b:(-b['fault_cases'],b['operation'],b['sector'],encoded(b['coverage_bucket'])))
-    summary={'kind':'application-plan','policy':TARGET_POLICY,'preflight':'PENDING',
-        'families':families,'bucket_count':len(buckets),'targets':total_targets,
-        'fault_cases':total_cases,'recoveries':recoveries,
-        'max_fault_cases':MAX_PLANNED_FAULT_CASES,'max_recoveries':MAX_PLANNED_RECOVERIES,
-        'buckets':ordered[:MAX_PLAN_SUMMARY_BUCKETS],
-        'omitted_bucket_rows':max(0,len(buckets)-MAX_PLAN_SUMMARY_BUCKETS),
-        'all_buckets_sha256':digest(encoded(buckets)),
-        'required_acknowledgements':[list(k) for k in sorted(required_acknowledgements())],
-        'recovery_schedules':[list(k) for k in RECOVERY_SCHEDULES]}
+        operation=batch['operation'];sector=batch['sector'];targets=batch['targets']
+        coverage.plan(operation,sector,targets);seen=set();cases=0
+        for row,target in targets:
+            RepresentativeMatcher(target)
+            require(target['baseline_seq'] not in seen,'duplicate representative storage target')
+            seen.add(target['baseline_seq']);modes=fault_modes(target);cases+=len(modes)
+            for mode in modes:
+                identity=(TARGET_POLICY,row,sector,mode)
+                require(identity not in identities,'duplicate representative case ID')
+                identities.add(identity)
+            rows.append(dict(row_id=row,operation=operation,sector=sector,
+                target=target_summary(target),fault_cases=len(modes),
+                recoveries=len(modes)*len(RECOVERY_SCHEDULES)))
+        families.append(dict(operation=operation,sector=sector,targets=len(targets),
+                             fault_cases=cases,recoveries=cases*len(RECOVERY_SCHEDULES)))
+    require(identities==expected_case_ids() and len(identities)==EXPECTED_FAULT_CASES,
+            'approved representative case identities differ')
+    recoveries=len(identities)*len(RECOVERY_SCHEDULES)
+    require(recoveries==EXPECTED_RECOVERIES,'approved recovery arithmetic differs')
+    summary=dict(kind='application-plan',policy=TARGET_POLICY,preflight='PASS',
+        families=families,rows=rows,targets=len(rows),fault_cases=len(identities),
+        recoveries=recoveries,case_ids=[list(k) for k in sorted(identities)],
+        required_acknowledgements=[list(k) for k in sorted(required_acknowledgements())],
+        recovery_schedules=[list(k) for k in RECOVERY_SCHEDULES])
     log(**summary)
-    require(total_cases<=MAX_PLANNED_FAULT_CASES,'application plan fault-case budget exceeded; no application injection')
-    require(recoveries<=MAX_PLANNED_RECOVERIES,'application plan recovery budget exceeded; no application injection')
-    require(not summary['omitted_bucket_rows'],'accepted plan summary incomplete')
-    log(kind='application-plan-gate',result='PASS',fault_cases=total_cases,recoveries=recoveries)
+    log(kind='application-plan-gate',result='PASS',policy=TARGET_POLICY,
+        fault_cases=len(identities),recoveries=recoveries)
     return summary
 
 
 def application_cases(requests, discover, acceptance):
-    # A generator deliberately yields NOTHING until every baseline and the full
-    # preflight succeed. Prerequisite probe/negative controls are a separate gate.
+    # No case until all 24 baselines and the entire fixed-ID plan pass.
     plans=compile_application_plans(requests,discover)
     preflight_application_plans(plans)
     for batch in plans:acceptance.plan(batch['operation'],batch['sector'],batch['targets'])
     for batch in plans:
-        log(kind='schedule',operation=batch['operation'],sector=batch['sector'],
-            selection='first-middle-last per coverage bucket; Nth live member; exact live private trace; no substitution',
+        log(kind='schedule',policy=TARGET_POLICY,operation=batch['operation'],sector=batch['sector'],
+            selection='approved row assignments; transaction/pass/generation binding; exact private trace; no substitution',
             targets=[target_summary(p) for _,p in batch['targets']])
         for _,target in batch['targets']:
             for fault in fault_modes(target):yield batch,target,fault
+
+
+def mutation_requests(before):
+    archived=next(r for r in before['records'] if r['status']=='archived')
+    active=next(r for r in before['records'] if r['status']=='active')
+    require(archived['revision']==active['revision']==3,'representative fixture must have three revisions')
+    revisions=[v for v in before['record_revisions'] if v['record_id']==archived['id']]
+    require(len(revisions)==3 and len({encoded({k:v[k] for k in ('data','key','sensitivity','provenance','status')}) for v in revisions})==3,
+            'restore fixture snapshots are not distinct')
+    return [
+        {'Operation':'create','Key':'r3-change','Body':checkpoint_body(before)},
+        {'Operation':'patch','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":3,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"changed":"patch"},"key":"changed","sensitivity":"restricted","provenance":{"source":"synthetic-r3"},"status":"active"}'},
+        {'Operation':'metadata','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":3,"key":null,"sensitivity":"restricted","provenance":null}'},
+        {'Operation':'archive','ID':active['id'],'Key':'r3-change','Body':'{"base_revision":3,"status":"archived"}'},
+        {'Operation':'unarchive','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":3,"status":"active"}'},
+        {'Operation':'noop','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":3,"status":"archived"}'},
+        {'Operation':'restore','ID':archived['id'],'Key':'r3-change','Target':1,'Body':'{"base_revision":3}'},
+        {'Operation':'checkpoint','Body':'{}'}, {'Operation':'autocheckpoint','Body':'{}'},
+    ]
+
+
+def verify_fault_result(target, fault, reached):
+    """Validate actual applied bytes/result, including a proper partial prefix."""
+    if fault=='cut-before':require('rc' not in reached,'cut-before I/O was applied');return
+    expected=(0 if fault=='cut-after' else (13 if fault=='full' else 10))
+    applied=(reached['length'] if reached['op']=='write' else 1) if fault=='cut-after' else 0
+    if fault=='partial':
+        applied=reached['length']//2
+        require(0<applied<reached['length'],'partial write lacks a proper prefix')
+    require(reached['rc']==expected and reached['applied']==applied,'injected fault result/applied bytes mismatch')
 
 
 def negative_oracles(worker,root,before,after,request,ack,image,m2schema):
@@ -1517,17 +1815,7 @@ def main():
     model_validation();raw_validation(worker,root)
     fixture=owned(root,'fixture');run(worker,'-root',fixture,'-mode','fixture')
     before=inspect(worker,fixture);consistency(before);initial=image_files(fixture);schema=before['sqlite_schema']
-    archived=next(r for r in before['records'] if r['status']=='archived');active=next(r for r in before['records'] if r['status']=='active')
-    requests=[
-        {'Operation':'create','Key':'r3-change','Body':checkpoint_body(before)},
-        {'Operation':'patch','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":2,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"changed":true}}'},
-        {'Operation':'metadata','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":2,"key":"changed","sensitivity":"restricted","provenance":{"source":"synthetic-r3"}}'},
-        {'Operation':'archive','ID':active['id'],'Key':'r3-change','Body':'{"base_revision":2,"status":"archived"}'},
-        {'Operation':'unarchive','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":2,"status":"active"}'},
-        {'Operation':'noop','ID':archived['id'],'Key':'r3-change','Body':'{"base_revision":2,"status":"archived"}'},
-        {'Operation':'restore','ID':archived['id'],'Key':'r3-change','Target':1,'Body':'{"base_revision":2}'},
-        {'Operation':'checkpoint','Body':'{}'}, {'Operation':'autocheckpoint','Body':'{}'},
-    ]
+    requests=mutation_requests(before)
     native=execute(worker,root,'validation-native',requests[0],initial,native=True)
     p=materialize(root,'native-validation',native['image']);oracle(before,inspect(worker,p),requests[0],native['ack'],schema);remove_owned(root,p)
     log(kind='validation',name='actual-application-native-VFS-control',result='PASS')
@@ -1551,16 +1839,17 @@ def main():
         check_mmap_coverage(base['messages'],settings)
         log(kind='settings',operation=op,sector=sector,value={q:setting_value(q,v) for q,v in settings.items() if q in SETTINGS})
         p=materialize(root,'baseline',base['model'].crash('retain',17));oracle(seedstate,inspect(worker,p),request,base['ack'],schema);remove_owned(root,p)
-        targets=select_targets(base['events'],op)
+        targets=select_representative_targets(base['events'],op,settings['page_size'])
         return dict(seedstate=seedstate,seedimage=seedimage,targets=targets)
 
     cases=0;recoveries=0;coverage=set();manifest=hashlib.sha256();acceptance=AcceptanceCoverage()
     for batch,target,fault in application_cases(requests,discover,acceptance):
         request=batch['request'];op=batch['operation'];sector=batch['sector']
         seedstate=batch['seedstate'];seedimage=batch['seedimage']
-        case=f'{op}-s{sector}-b{target["baseline_seq"]}-{fault}'
+        case=f'{TARGET_POLICY}-{target["row_id"]}-s{sector}-{fault}'
         got=execute(worker,root,case,request,seedimage,target,fault,sector)
         reached=got['all'][got['target_seq']]
+        verify_fault_result(target,fault,reached)
         evidence=target_evidence(target,reached)
         schedules=RECOVERY_SCHEDULES
         results=[]
@@ -1569,6 +1858,8 @@ def main():
             p=materialize(root,'recovery',image)
             # FIRST SQLite connection after reconstruction: separate process, no migration.
             state=inspect(worker,p);outcome=oracle(seedstate,state,request,got['ack'],schema)
+            if target['boundary']=='commit-sync' and fault=='cut-after':
+                require(outcome=='present','successful committing WAL sync lost durable transaction')
             replay(worker,root,p,seedstate,request,got['ack'],schema)
             item={'schedule':schedule,'seed':seed,'outcome':outcome,'image_sha256':digest(encoded({n:digest(b) for n,b in image.items()})),'state_sha256':digest(encoded(state))}
             results.append(item);recoveries+=1;remove_owned(root,p)
@@ -1576,7 +1867,11 @@ def main():
         acceptance.complete(op,sector,target,fault,results,got['ack_before_fault'])
         log(**report);manifest.update(encoded(report));cases+=1;coverage.add((op,reached['role'],target['descriptor']['meaning'],fault))
     acceptance.require_complete()
-    log(kind='FINAL',harness_validation='PASS',T18='PASS',T30='PASS',R3='PASS within write-back-v1 model',cases=cases,recoveries=recoveries,coverage=sorted(coverage),manifest_sha256=manifest.hexdigest(),artifact_upload=False,paid_usage_authorized=0)
+    require(cases==EXPECTED_FAULT_CASES and recoveries==EXPECTED_RECOVERIES,'final representative arithmetic differs')
+    log(kind='FINAL',policy=TARGET_POLICY,harness_validation='PASS',
+        T18='PARTIAL; unrelated acceptance remains separate',T30='BLOCKED pending owner evidence review',
+        D6='OPEN pending owner acceptance',M2='PENDING',R3='PASS within write-back-v1 model; owner acceptance PENDING',
+        cases=cases,recoveries=recoveries,coverage=sorted(coverage),manifest_sha256=manifest.hexdigest(),artifact_upload=False,paid_usage_authorized=0)
     # Only the marked, test-created root is removed, after results/hashes were logged.
     require(root.parent.resolve()==Path(os.environ['RUNNER_TEMP']).resolve() and (root/MARKER).is_file(),'final cleanup ownership')
     shutil.rmtree(root)

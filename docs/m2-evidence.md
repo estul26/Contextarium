@@ -13,8 +13,10 @@ Latest adopted acceptance policy: **representative-r3-v1 — OWNER APPROVED**,
 2026-10-01. See the [documentation-only adoption record](#representative-r3-v1--owner-approved-documentation-only)
 and [approved matrix](m2-r3-representative-proposal.md#6-approved-fault-matrix).
 The owner approved exactly 78 faults / 234 recovery executions and the demonstrated
-runner/test-only VFS environment class. No representative harness implementation,
-validation or execution has occurred; environment selection is resolved, execution
+runner/test-only VFS environment class. A subsequent
+[source-only representative harness candidate](#representative-r3-v1--harness-source-review-only)
+is now prepared, with static review only. No runtime validation, discovery or
+representative execution has occurred; environment selection is resolved, execution
 slots remain ZERO and all acceptance statuses remain unchanged. Earlier broader
 policy statements below describe their historical source/run; they do not expand
 the newly approved acceptance matrix.
@@ -170,7 +172,7 @@ the stated software/ordinary-process cases; it does not substitute for T30.
 | T27 | PASS | `TestM2HTTPContractAndSafety`, `TestAPILoopbackHostForms`, existing strict/privacy/config tests (G/R/B): new-route Host/Origin/Sec-Fetch, IPv4/IPv6, malformed ports/hosts, media/body/query limits, safe headers/errors/logs, absent deferred APIs. | None. |
 | T28 | PASS | `TestM2ShutdownWithCommittedMutation`, `TestM2CommittedResponseLossReplay`, `TestM2CancellationBeforeCommit`, existing probe/drain/forced-close/startup tests (G/R/B): readiness withdrawal, drain/force-close, committed response loss and retry, resource release, graceful SIGTERM. | Graceful shutdown is not abrupt/power-loss evidence. |
 | T29 | PASS | `TestM2ColdRestartRecovery` (F/G/R): sole-child create/PATCH/restore at F6/F8, raw crash-left WAL verification, fresh-process recovery and exact same-key replay; `TestM2AbruptChildRecovery` retains live-observer F0–F6/F8 coverage; `TestM2MigrationAbruptRecovery` covers U0–U5. | R2 only. Cold mutation coverage is specifically F6/F8; F7 storage/sync and power loss remain R3/T30, not claimed here. |
-| T30 | BLOCKED | Eighth job: 26 classifier + 52 targeting + 16 fixture tests, nine wrappers, prerequisites, five negative controls and genuine M1 fixtures PASS. Bounded invocation timed out after 1,560 cases / 7,800 recoveries; explicit checkpoint complete in both sectors; 1,405 cases establish pre-fault acknowledged-effect survival. | representative-r3-v1 and D6 environment class OWNER APPROVED; exact 78 faults/234 recoveries not implemented or executed. Earlier incomplete automatic checkpoint/later-family/post-ack coverage remains historical; no old case fills the new matrix. All eight slots consumed; execution slots ZERO; no final acceptance PASS. |
+| T30 | BLOCKED | Eighth job: 26 classifier + 52 targeting + 16 fixture tests, nine wrappers, prerequisites, five negative controls and genuine M1 fixtures PASS. Bounded invocation timed out after 1,560 cases / 7,800 recoveries; explicit checkpoint complete in both sectors; 1,405 cases establish pre-fault acknowledged-effect survival. | representative-r3-v1 and D6 environment class OWNER APPROVED; exact 78 faults/234 recoveries now have a source-only harness candidate; runtime validation and execution remain NOT RUN. Earlier incomplete automatic checkpoint/later-family/post-ack coverage remains historical; no old case fills the new matrix. All eight slots consumed; execution slots ZERO; no final acceptance PASS. |
 
 ## Failure points and observation
 
@@ -1827,7 +1829,7 @@ public list is not an unredacted compiler-options transcript.
 | `scripts/r3-check.py` | `deab5ec4d2a1d2941779baf1af0a23dcf4dc78ebd0098619b881d26b187561c9` |
 | `scripts/r3_wal_test_vectors.py` | `0e8330960d6523d271d6508c00982d71a33b1e0edc0fd576bd776697c202aeb4` |
 | `scripts/test_r3_fixture.py` | `4326a6930d06467ed3a7a0d41037e1c6c45bfcaa103e5f2c46181fdb0d5ea433` |
-| `scripts/test_r3_targeting.py` | `928b0f2a61b91ad6e29b2c459cf9b5209ee43800b5919682fd8dd09360687b0d` |
+| `scripts/test_r3_targeting.py` | `9f905ac12e8053e167fa6f9015f9a938e0a2a6ff111e36da828ff1c2c19f6f7b` |
 | `scripts/test_r3_wal_classifier.py` | `cf14904dad3e370d49a07a058f697e1fb58f28c2fbb3e139ed61566716c9cdf9` |
 | `sqlite3-binding.c` | `eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00` |
 | `sqlite3-binding.h` | `4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f` |
@@ -2144,3 +2146,67 @@ original T18 requirements, application-contract sections 1–7, original R3 plan
 text and every historical failure/run/v4 section. Diff/whitespace and scope checks
 confirm only the five authorized documentation paths. This is documentation
 validation, not new application or harness test evidence.
+
+## representative-r3-v1 — harness source review only
+
+**2026-10-01. T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING;
+PR #6 DRAFT; additional execution slots ZERO.**
+
+Following the scoped next-step instruction, the owner authorized test-only
+representative harness/test-source adaptation, static review, commit and push.
+Starting policy checkpoint: `197d6db1c3cbc299860bb1c4f3ae2cc6c57481aa`.
+Application remains `b6f63a7564977555faffe6f9ca6b1a9c22910d43`; genuine M1
+remains `14dc96ad18810202f63d5ac590822f117a787e82`. The containing commit
+identifies the source candidate. This is separate from the documentation-only
+adoption above, which is preserved as policy history.
+
+[Source review record](m2-r3-representative-source-review.md) describes the exact
+24 approved row assignments, fixed case IDs, all 12 families, transaction/pass/
+generation selection, fixtures, ledger guards and remaining execution gaps.
+Source arithmetic: **48 selected targets, 39 faults per sector x 2 = 78 faults;
+78 x discard/17, retain/17, reorder-torn/17 = 234 recoveries**. All 12 post-ack
+categories remain required, with 22 K/A acknowledged cases / 66 recoveries minimum.
+Every K/A case requires an already ledger-fsynced complete successful response,
+not merely a WAL commit marker. No universal shape/position/mode/seed expansion.
+
+The source adds a seed-17 reorder/torn witness and degenerate discard/retain
+negative controls without changing Model's algorithm. Complete-frame payload
+coverage precedes committing-sync selection; a later header/checkpoint-only sync
+cannot borrow a previous commit. Checkpoint-preparation creates have distinct
+fixed test phases. Combined PATCH, nullable metadata clearing and three distinct
+restore snapshots have separate source fixtures. Actual applied bytes/return codes
+are checked, including proper-prefix P and durability after committing-sync CA.
+
+**Prepared regression source: 96 targeting + 26 classifier + 16 fixture = 138
+methods; ALL NOT RUN for this candidate.** No controller/test module import,
+test, tagged build, bridge, binary, fixture/probe, no-fault discovery, R3 or
+fault/recovery schedule occurred. No job was dispatched/rerun. Runtime target
+reachability, layout stability, actual seed-17 witness behavior and execution
+duration remain unverified. Static checks are not an R3 PASS.
+
+Static checks performed: Python AST syntax and unique regression-method names;
+Go formatting; exact literal assignments compared with all 24 approved decision
+rows; 12 family mappings and 78/234 arithmetic; all 12 documented post-ack
+categories and 22/66 arithmetic; byte-identical protected Model/classifier/
+consistency/oracle/replay/ledger/genuine-M1-fixture functions; intact authoritative
+F0-F8/U0-U5 and historical evidence; links, English additions, diff/whitespace
+and path scope. No production code, migration, VFS/classifier, dependency or
+workflow changed. Source hashes:
+
+| Source | SHA-256 |
+| --- | --- |
+| `scripts/r3-check.py` | `df36f0351e2da6da906cd0950ed380c5d8f192ca3355a9c3ee47b8d696c89d78` |
+| `scripts/test_r3_targeting.py` | `9f905ac12e8053e167fa6f9015f9a938e0a2a6ff111e36da828ff1c2c19f6f7b` |
+| `internal/r3/worker/main.go` | `efad70cad4f8c1b2b7a181d6363fc2527cd3785b33912b04a4426049c9e6eee9` |
+
+The [eighth-run record](#eighth-dedicated-job--prerequisites-pass-bounded-matrix-times-out)
+remains unchanged: 1,560 completed cases / 7,800 recoveries, including 1,405
+pre-fault acknowledged cases whose 7,025 recoveries preserved effects and replayed
+without duplication. The timeout and incomplete coverage are preserved; no old
+case fills the representative matrix and no semantic relabelling occurred.
+
+D6 environment selection remains OWNER APPROVED as previously enumerated. It is
+not execution approval. Ordinary CI may run automatically after this source push
+and is not tagged-harness validation or R3 evidence. Publication stops here:
+no execution allowance requested/consumed, acceptance closure, merge, deployment
+or M3. Further runtime work requires separately scoped owner authorization.

@@ -21,9 +21,22 @@ Current implementation evidence is tracked in the [T01–T30 matrix](../m2-evide
 and demonstrated standard GitHub-hosted `ubuntu-24.04`/test-only VFS environment
 class are adopted for D6/T30. Environment selection is resolved, while
 **T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
-execution slots ZERO**. Only documentation alignment/validation/commit/push is
-authorized. No harness implementation, R3 execution/new slot, production or
+execution slots ZERO**. The policy approval authorized only documentation
+alignment/validation/commit/push.
+It did not authorize harness implementation, R3 execution/new slot, production or
 migration changes, merge, deployment or M3. Earlier design status is historical.
+
+## Subsequent representative harness source-only authorization
+
+On 2026-10-01 the owner authorized the scoped next step: representative harness
+and necessary test-source adaptation, static review, commit and push to existing
+Draft PR #6. See the [source review record](../m2-r3-representative-source-review.md).
+This supersedes the policy-adoption implementation restriction only for this
+source-only work. No tests, classifier bridge, compilation/build, fixture/probe,
+no-fault discovery, R3 or fault/recovery schedule is executed or authorized here.
+Production code, migrations, VFS/classifier, dependencies and workflows stay
+unchanged. No execution slot is requested or consumed. T18 PARTIAL, T30 BLOCKED,
+D6/R3 OPEN, M2 acceptance PENDING and PR #6 DRAFT remain unchanged.
 
 ## Historical documentation approval record
 

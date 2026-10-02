@@ -22,13 +22,26 @@ and the demonstrated standard GitHub-hosted runner/test-only VFS environment
 class. See [R3 below](#r3--simulated-storage-failure-and-power-loss) and the
 [approved decision record](m2-r3-representative-proposal.md).
 
-This authorization permits documentation alignment, validation, commit and push
-to Draft PR #6 only. It does not authorize harness implementation, R3 execution,
+The policy approval authorized documentation alignment, validation, commit and push
+to Draft PR #6 only. It did not authorize harness implementation, R3 execution,
 a new execution slot, production/migration changes, merge, deployment or M3.
 **T18 PARTIAL; T30 BLOCKED; D6/R3 OPEN; M2 acceptance PENDING; PR #6 DRAFT;
 additional execution slots ZERO.** Environment selection is resolved; the new
-representative harness and acceptance execution evidence remain missing.
+representative harness runtime validation and acceptance execution evidence
+remain missing.
 F0–F8, U0–U5, R1/R2 and all unrelated T01–T30 requirements remain intact.
+
+## Subsequent representative harness source-only authorization
+
+On 2026-10-01 the owner authorized the scoped next step: representative harness
+and necessary test-source adaptation, static review, commit and push to existing
+Draft PR #6. See the [source review record](m2-r3-representative-source-review.md).
+This supersedes the policy-adoption implementation restriction only for this
+source-only work. No tests, classifier bridge, compilation/build, fixture/probe,
+no-fault discovery, R3 or fault/recovery schedule is executed or authorized here.
+Production code, migrations, VFS/classifier, dependencies and workflows stay
+unchanged. No execution slot is requested or consumed. T18 PARTIAL, T30 BLOCKED,
+D6/R3 OPEN, M2 acceptance PENDING and PR #6 DRAFT remain unchanged.
 
 ## Historical documentation approval record
 

@@ -174,7 +174,9 @@ func main() {
 			count = 40
 		}
 		for i := 0; i < count; i++ {
-			startPhase(input.Operation)
+			// Bind each real application transaction to a fixed test-only phase.
+			// Do not lower SQLite's default automatic-checkpoint threshold.
+			startPhase(fmt.Sprintf("%s-create-%03d", input.Operation, i))
 			var sub string
 			must(db.QueryRow("SELECT id FROM subjects ORDER BY id LIMIT 1").Scan(&sub))
 			body := []byte(fmt.Sprintf(`{"subject_id":%q,"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"payload":%q}}`, sub, strings.Repeat("c", 48000)))
@@ -238,12 +240,15 @@ func fixture(db *sql.DB) {
 	_, err = s.PublishSchema(ctx, "schema", []byte(`{"schema_id":"example.r3","schema_version":1,"definition":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"},"migration_policy":"explicit"}`))
 	must(err)
 	for i := 0; i < 2; i++ {
-		body := []byte(fmt.Sprintf(`{"subject_id":%q,"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"unknown":["雪",true],"payload":%q}}`, sub.ID, strings.Repeat("a", 12000)))
+		body := []byte(fmt.Sprintf(`{"subject_id":%q,"namespace":"example.r3","schema_id":"example.r3","schema_version":1,"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"unknown":["\u96ea",true],"payload":%q}}`, sub.ID, strings.Repeat("a", 12000)))
 		result, err := s.CreateRecord(ctx, fmt.Sprintf("fixture-%d", i), body)
 		must(err)
 		var rec engine.Record
 		must(json.Unmarshal(result.Data, &rec))
 		_, err = s.UpdateRecord(ctx, rec.ID, fmt.Sprintf("fixture-patch-%d", i), []byte(fmt.Sprintf(`{"base_revision":1,"key":"synthetic","status":%q,"provenance":{"source":"synthetic"}}`, []string{"archived", "active"}[i])))
+		must(err)
+		// Restore selects revision 1 from a head with three distinct snapshots.
+		_, err = s.UpdateRecord(ctx, rec.ID, fmt.Sprintf("fixture-third-%d", i), []byte(`{"base_revision":2,"key":"synthetic-latest","provenance":{"source":"synthetic-latest"},"data":{"n":9007199254740993,"d":0.30,"e":1e2,"z":-0,"changed":true}}`))
 		must(err)
 	}
 	emit(map[string]any{"kind": "fixture", "settings": settings(db)})
